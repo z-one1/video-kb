@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" role="img" aria-label="video-kb — turn video into knowledge your agent can reason over">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111c2e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <linearGradient id="faint" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1e293b" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1e293b" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="1.2"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="320" fill="url(#bg)"/>
+
+  <!-- Subtle grid -->
+  <g stroke="#1e293b" stroke-width="1" opacity="0.5">
+    <path d="M0 80 H1200 M0 160 H1200 M0 240 H1200"/>
+    <path d="M120 0 V320 M240 0 V320 M360 0 V320 M480 0 V320 M600 0 V320 M720 0 V320 M840 0 V320 M960 0 V320 M1080 0 V320"/>
+  </g>
+
+  <!-- Left graphic: film frames -> graph nodes -->
+  <g transform="translate(72,90)">
+    <!-- Film strip -->
+    <g>
+      <rect x="0" y="0" width="150" height="140" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.5"/>
+      <g fill="#1e293b">
+        <rect x="8"  y="6"  width="10" height="10" rx="2"/>
+        <rect x="8"  y="124" width="10" height="10" rx="2"/>
+        <rect x="132" y="6" width="10" height="10" rx="2"/>
+        <rect x="132" y="124" width="10" height="10" rx="2"/>
+      </g>
+      <!-- Frame previews -->
+      <rect x="22" y="24" width="106" height="28" rx="3" fill="#1e293b"/>
+      <rect x="22" y="58" width="106" height="28" rx="3" fill="#1e293b"/>
+      <rect x="22" y="92" width="106" height="28" rx="3" fill="#1e293b"/>
+      <!-- Sparkle highlight on a frame -->
+      <g stroke="#34d399" stroke-width="1.2" fill="none" opacity="0.9">
+        <path d="M34 36 L50 36 M34 42 L66 42"/>
+      </g>
+      <g stroke="#60a5fa" stroke-width="1.2" fill="none" opacity="0.9">
+        <path d="M34 70 L58 70 M34 76 L74 76"/>
+      </g>
+      <g stroke="#a78bfa" stroke-width="1.2" fill="none" opacity="0.9">
+        <path d="M34 104 L46 104 M34 110 L70 110"/>
+      </g>
+    </g>
+
+    <!-- Arrow -->
+    <g stroke="url(#accent)" stroke-width="2" fill="none">
+      <path d="M165 70 L210 70" stroke-linecap="round"/>
+      <path d="M200 62 L210 70 L200 78" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <!-- Knowledge graph -->
+    <g transform="translate(235,0)">
+      <!-- Edges -->
+      <g stroke="#334155" stroke-width="1.2" fill="none" opacity="0.9">
+        <line x1="70" y1="30"  x2="30"  y2="80"/>
+        <line x1="70" y1="30"  x2="110" y2="80"/>
+        <line x1="70" y1="30"  x2="70"  y2="80"/>
+        <line x1="30" y1="80"  x2="70"  y2="120"/>
+        <line x1="110" y1="80" x2="70"  y2="120"/>
+        <line x1="70" y1="80"  x2="70"  y2="120"/>
+        <line x1="30" y1="80"  x2="110" y2="80" opacity="0.5"/>
+      </g>
+      <!-- Nodes -->
+      <g>
+        <circle cx="70"  cy="30"  r="9" fill="#34d399"/>
+        <circle cx="30"  cy="80"  r="7" fill="#60a5fa"/>
+        <circle cx="70"  cy="80"  r="7" fill="#60a5fa"/>
+        <circle cx="110" cy="80"  r="7" fill="#60a5fa"/>
+        <circle cx="70"  cy="120" r="9" fill="#a78bfa"/>
+      </g>
+    </g>
+  </g>
+
+  <!-- Text block -->
+  <g transform="translate(620,130)" font-family="'Inter','Helvetica Neue',Arial,sans-serif">
+    <text x="0" y="0" font-size="72" font-weight="800" fill="#f8fafc" letter-spacing="-2">video-kb</text>
+    <text x="0" y="44" font-size="20" font-weight="500" fill="#94a3b8" letter-spacing="0.3">
+      Turn video into knowledge your agent can reason over.
+    </text>
+    <g transform="translate(0,72)">
+      <rect x="0"   y="0" width="118" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+      <text x="59"  y="18" font-size="12" fill="#cbd5e1" text-anchor="middle" font-weight="600">Whisper · local</text>
+      <rect x="128" y="0" width="118" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+      <text x="187" y="18" font-size="12" fill="#cbd5e1" text-anchor="middle" font-weight="600">bge-m3 · local</text>
+      <rect x="256" y="0" width="110" height="28" rx="14" fill="#0f172a" stroke="#334155"/>
+      <text x="311" y="18" font-size="12" fill="#cbd5e1" text-anchor="middle" font-weight="600">ChromaDB</text>
+      <rect x="376" y="0" width="80"  height="28" rx="14" fill="#0f172a" stroke="#34d399"/>
+      <text x="416" y="18" font-size="12" fill="#34d399" text-anchor="middle" font-weight="700">MCP</text>
+    </g>
+  </g>
+
+  <!-- Corner label -->
+  <g transform="translate(1100,40)" font-family="'JetBrains Mono','SF Mono',Menlo,monospace">
+    <text x="0" y="0" font-size="12" fill="#475569" text-anchor="end">v0.1 · MIT</text>
+  </g>
+</svg>
