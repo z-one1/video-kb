@@ -1,0 +1,69 @@
+# video_kb 默认 pipeline 配置
+# 所有路径相对于项目根目录
+
+paths:
+  kb_root: kb                    # 知识库根目录
+  videos_dir: kb/videos          # 每视频一个子目录
+  chroma_dir: kb/kb_db           # ChromaDB 向量库
+
+ingest:
+  # yt-dlp 下载选项
+  format: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+  subtitle_langs: ["en", "zh-Hans", "zh-Hant", "zh"]
+  write_auto_subs: true
+
+stt:
+  # faster-whisper 配置
+  model_size: "large-v3-turbo"   # tiny/base/small/medium/large-v3/large-v3-turbo
+  device: "cpu"                  # cpu (int8) 或 cuda
+  compute_type: "int8"
+  language: null                 # null = 自动检测; 或 "zh" / "en"
+  word_timestamps: false         # 开启会慢 30%
+  vad_filter: true               # 过滤静音段
+  beam_size: 5
+
+scenes:
+  # PySceneDetect 关键帧抽取
+  threshold: 27.0                # ContentDetector 阈值,越低越敏感
+  min_scene_len: 15              # 最短场景(帧数)
+  fallback_interval_sec: 30      # 无场景切换时的兜底采样间隔
+  max_frames: 200                # 单视频最大帧数上限 (保护额度)
+
+vision:
+  provider: "claude_code"        # claude_code | gemini | none
+  # --- claude_code 选项 (走 Max 订阅,不吃 Gemini 配额) ---
+  claude_model: "sonnet"         # sonnet | opus | haiku
+  timeout_sec: 120               # 每帧 CLI 调用超时
+  # --- gemini 选项 (备用) ---
+  gemini_model: "gemini-2.5-flash-lite"
+  # --- 通用 ---
+  max_concurrent: 2              # 当前串行调用,此字段为未来并发准备
+  retry_max: 3                   # 失败重试次数
+  retry_delay_sec: 4             # 退避基数,delay = base * attempt
+
+fusion:
+  # 时间戳对齐策略
+  visual_attach_mode: "cover"    # cover = 字幕段内所有覆盖的帧;nearest = 最近一帧
+
+structuring:
+  provider: "claude_code"        # claude_code | gemini | none
+  claude_model: "sonnet"         # 传给 claude CLI 的 --model
+  gemini_model: "gemini-2.5-flash-lite"  # lite 版有免费层
+  max_input_chars: 200000        # 超过则分段处理
+
+embedding:
+  model: "BAAI/bge-m3"
+  chunk_size: 500                # 字符数 (不是 token)
+  chunk_overlap: 50
+  batch_size: 32
+  normalize: true
+
+export:
+  claude_project_dir: claude_upload  # 输出到项目根目录下的这个文件夹
+  include_frames: true                # 是否把关键帧打包
+
+ask:
+  # kb ask 命令 — 检索 + LLM 生成带引用答案
+  provider: "claude_code"         # 目前只支持 claude_code(复用 Max 订阅,零成本)
+  claude_model: "sonnet"          # sonnet | opus | haiku(留空则复用 structuring.claude_model)
+  timeout_sec: 180                # 单次 CLI 调用超时

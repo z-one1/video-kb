@@ -1,0 +1,68 @@
+# -------- Python --------
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# -------- Secrets / env --------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# -------- Runtime outputs (user data / copyrighted content) --------
+# 用户处理的视频、关键帧、字幕、笔记、向量库 — 一律不提交
+# 这些目录会在首次 `kb ingest` 时自动创建,不需要 .gitkeep 占位
+# 注意 leading slash — 只匹配项目根目录下的 kb/,不会误伤 src/kb/ 源代码
+/kb/
+/claude_upload/
+
+# -------- Logs / tmp / scratch --------
+*.log
+logs/
+tmp/
+scratch/
+.cache/
+
+# -------- Model weights (huggingface 本地缓存不走项目内) --------
+# 正常应在 ~/.cache/huggingface,但以防万一
+models/
+checkpoints/
+*.safetensors
+*.onnx
+
+# -------- OS --------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -------- IDE / editors --------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# -------- Claude Code 本地会话(项目内) --------
+.claude/settings.local.json
+
+# -------- Coverage / testing --------
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# -------- Jupyter --------
+.ipynb_checkpoints/

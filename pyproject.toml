@@ -1,0 +1,57 @@
+[project]
+name = "video-kb"
+version = "0.1.0"
+description = "自动视频知识库 RAG 系统 — YouTube/本地视频 → 带时间戳+视觉理解的可检索知识库"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # 视频获取
+    "yt-dlp>=2024.12.0",
+    "ffmpeg-python>=0.2.0",
+    # 语音转写 (本地,免费)
+    "faster-whisper>=1.0.3",
+    # 关键帧 (场景切换检测)
+    "scenedetect[opencv]>=0.6.4",
+    # 视觉理解
+    "google-genai>=0.3.0",
+    "Pillow>=10.0.0",
+    # 嵌入 + 分块
+    "sentence-transformers>=3.0",
+    "langchain-text-splitters>=0.3.0",
+    # 向量库
+    "chromadb>=0.5.0",
+    # 通用
+    "pydantic>=2.0",
+    "typer>=0.15.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.66.0",
+    # MCP server — 暴露 kb 工具给 Claude Code / Cowork / Desktop
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+local-vision = ["transformers>=4.45", "torch>=2.3", "accelerate>=0.30"]
+diarization = ["pyannote.audio>=3.3"]
+dashboard = ["streamlit>=1.40"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10"]
+
+[project.scripts]
+kb = "kb.cli:app"
+kb-mcp = "kb.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kb"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

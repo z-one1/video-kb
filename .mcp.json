@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "video-kb": {
+      "command": "kb-mcp",
+      "args": []
+    }
+  }
+}
