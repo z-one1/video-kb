@@ -35,7 +35,6 @@ def detect_scenes(
     threshold = cfg.get("threshold", 27.0)
     min_scene_len = cfg.get("min_scene_len", 15)
     interval = cfg.get("fallback_interval_sec", 30)
-    max_frames = cfg.get("max_frames", 200)
 
     log.info(f"Detecting scenes (threshold={threshold}) ...")
     scenes = detect(
@@ -82,6 +81,14 @@ def detect_scenes(
     # 按时间排序
     scene_frames.sort(key=lambda x: x[0])
 
+    # 按时长动态计算 max_frames (取代旧的静态 200)
+    max_frames = _compute_max_frames(duration, cfg)
+    log.info(
+        f"max_frames = {max_frames} "
+        f"(duration={duration:.0f}s, rate={cfg.get('frames_per_minute', 5)}/min, "
+        f"floor={cfg.get('max_frames_floor', 20)}, ceiling={cfg.get('max_frames_ceiling', 160)})"
+    )
+
     # 帧数超限 → 均匀下采样
     if len(scene_frames) > max_frames:
         log.warning(
@@ -118,6 +125,25 @@ def detect_scenes(
 
     log.info(f"Extracted {len(frames)} keyframes → {out_dir}")
     return frames
+
+
+def _compute_max_frames(duration_sec: float, cfg: dict[str, Any]) -> int:
+    """按视频时长计算 max_frames,公式:
+        clamp(round(duration_min * frames_per_minute), floor, ceiling)
+
+    向后兼容:如果 cfg 里有老字段 `max_frames`,优先用那个(静态 cap)。
+    """
+    # 向后兼容:老 config 里显式给了 max_frames 就直接用
+    legacy = cfg.get("max_frames")
+    if legacy is not None:
+        return int(legacy)
+
+    fpm = cfg.get("frames_per_minute", 5)
+    floor = cfg.get("max_frames_floor", 20)
+    ceiling = cfg.get("max_frames_ceiling", 160)
+    duration_min = max(duration_sec, 0.0) / 60.0
+    target = round(duration_min * fpm)
+    return max(floor, min(ceiling, target))
 
 
 def _extract_frame(video_path: Path, t_sec: float, out_path: Path) -> None:

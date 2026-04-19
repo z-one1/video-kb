@@ -237,11 +237,25 @@ def query(
     text: str = typer.Argument(..., help="检索问题"),
     n: int = typer.Option(5, "--n", help="返回结果数"),
     video_id: Optional[str] = typer.Option(None, "--video-id", help="仅在指定视频中搜索"),
+    no_aliases: bool = typer.Option(
+        False, "--no-aliases", help="禁用同义词扩展(默认开启,词典见 configs/aliases.yaml)"
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c"),
 ):
     """语义检索 ChromaDB 向量库。"""
     cfg = load_config(config)
     where = {"video_id": video_id} if video_id else None
+
+    # 加载别名词典(若启用且配置/文件存在)
+    aliases_lookup = None
+    if not no_aliases:
+        from .retrieval.aliases import load_aliases
+        ap = cfg.get("retrieval", {}).get("aliases_path")
+        if ap:
+            apath = Path(ap)
+            if not apath.is_absolute():
+                apath = Path(cfg.get("_project_root", ".")) / apath
+            aliases_lookup = load_aliases(apath) or None
 
     hits = chroma_client.query(
         text,
@@ -249,6 +263,7 @@ def query(
         cfg["embedding"],
         n_results=n,
         where=where,
+        aliases_lookup=aliases_lookup,
     )
     if not hits:
         console.print("[yellow]No results.[/yellow]")
@@ -283,6 +298,9 @@ def ask(
     video_id: Optional[str] = typer.Option(
         None, "--video-id", help="仅在指定视频中搜索"
     ),
+    no_aliases: bool = typer.Option(
+        False, "--no-aliases", help="禁用同义词扩展(默认开启)"
+    ),
     show_chunks: bool = typer.Option(
         False, "--show-chunks", help="同时显示检索到的原始 chunks"
     ),
@@ -305,6 +323,7 @@ def ask(
             cfg=cfg,
             n_results=n,
             video_id=video_id,
+            use_aliases=not no_aliases,
         )
 
     console.rule(f"[bold]Q: {question}[/bold]")
@@ -344,13 +363,23 @@ def ask(
 def stats(
     config: Optional[Path] = typer.Option(None, "--config", "-c"),
 ):
-    """显示向量库统计。"""
+    """显示向量库统计(按 source_type 和 source_id 拆分)。"""
     cfg = load_config(config)
     info = chroma_client.stats(cfg["paths"]["chroma_dir"])
     console.print(f"[bold]Total chunks:[/bold] {info['total_chunks']}")
+
+    per_type = info.get("per_type") or {}
+    if per_type:
+        ttable = Table(title="By source_type", show_lines=False)
+        ttable.add_column("type", style="magenta")
+        ttable.add_column("chunks", justify="right")
+        for t, n in sorted(per_type.items(), key=lambda x: -x[1]):
+            ttable.add_row(t, str(n))
+        console.print(ttable)
+
     if info["videos"]:
-        table = Table(title="Videos in KB")
-        table.add_column("video_id", style="cyan")
+        table = Table(title="By source_id (video_id / pdf_xxx / img_xxx)")
+        table.add_column("source_id", style="cyan")
         table.add_column("chunks", justify="right")
         for vid, n in sorted(info["videos"].items(), key=lambda x: -x[1]):
             table.add_row(vid, str(n))
@@ -428,6 +457,418 @@ def export(
     out = Path(cfg["_project_root"]) / cfg["export"].get("claude_project_dir", "claude_upload")
     claude_project.export_for_claude_project(vdir, out, meta, notes)
     console.print(f"[green]Exported:[/green] {out / video_id}")
+
+
+@app.command()
+def reindex(
+    video_id: Optional[str] = typer.Argument(
+        None, help="要重建的 video_id;不填则重建所有 kb/videos/* 下可用的"
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+    log_level: str = typer.Option("INFO", "--log"),
+):
+    """只重切块+重嵌入,复用已有 enriched.json + notes.json。
+
+    用法:
+        kb reindex                   # 全量重建
+        kb reindex <video_id>        # 只重建一个
+
+    典型场景:调整了 embedding.min_chunk_chars / max_visuals_per_window
+    等参数,想应用到现有 KB,但不想重跑 STT/Vision/LLM。
+    """
+    results = pipeline.reindex(
+        video_id=video_id,
+        cfg_path=config,
+        log_level=log_level,
+    )
+    if not results:
+        console.print("[yellow]没东西可重建。[/yellow]")
+        return
+
+    table = Table(title="Reindex 结果", show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("video_id", style="cyan")
+    table.add_column("删掉", justify="right")
+    table.add_column("新增", justify="right", style="green")
+    table.add_column("Δ", justify="right")
+    for i, r in enumerate(results, 1):
+        delta = r["chunks_new"] - r["chunks_deleted"]
+        sign = "+" if delta >= 0 else ""
+        table.add_row(
+            str(i),
+            r["video_id"],
+            str(r["chunks_deleted"]),
+            str(r["chunks_new"]),
+            f"{sign}{delta}",
+        )
+    console.print(table)
+    console.print(
+        f"\n[bold green]✅ 共重建 {len(results)} 个视频[/bold green]"
+    )
+
+
+# ========= kb ingest-doc / kb docs =========
+
+
+@app.command("ingest-doc")
+def ingest_doc_cmd(
+    source: Path = typer.Argument(..., help="PDF 或图片文件路径(也可以是文件夹,递归入库所有支持的文件)"),
+    recursive: bool = typer.Option(
+        True, "--recursive/--no-recursive", "-r",
+        help="source 是文件夹时递归扫子目录(默认开)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="忽略缓存重跑(PDF 重抽文本 / 图片重新调 Claude 描述)"
+    ),
+    pdf_provider: Optional[str] = typer.Option(
+        None, "--pdf-provider",
+        help="PDF 抽取 provider:claude_code(默认,慢但能 OCR+图表+表格) / pypdf(快,仅文本)",
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+    log_level: str = typer.Option("INFO", "--log"),
+):
+    """把独立 PDF / 图片 入库到同一 ChromaDB(和视频并列,支持统一检索)。
+
+    PDF 默认走 Claude CLI (`--pdf-provider claude_code`),能读扫描版、转录图表、
+    保留表格结构。如果 PDF 是纯文本、量大、想快速索引,可以 `--pdf-provider pypdf`。
+
+    示例:
+        kb ingest-doc notes.pdf                             # 单 PDF(Claude CLI)
+        kb ingest-doc notes.pdf --pdf-provider pypdf        # 单 PDF(纯文本快速)
+        kb ingest-doc ~/Desktop/chart.png                   # 单张图
+        kb ingest-doc ~/Documents/trading_refs              # 整个目录(递归)
+        kb ingest-doc notes.pdf --force                     # 忽略缓存重跑
+    """
+    from .ingest.docs import detect_doc_type
+
+    src = source.expanduser().resolve()
+    if not src.exists():
+        console.print(f"[red]Not found: {src}[/red]")
+        raise typer.Exit(1)
+
+    # 收集目标文件
+    targets: list[Path] = []
+    if src.is_file():
+        if detect_doc_type(src) is None:
+            console.print(f"[red]不支持的文件类型:[/red] {src.suffix}")
+            raise typer.Exit(1)
+        targets = [src]
+    else:
+        # 目录 → 扫所有支持类型
+        patterns = ["*.pdf", "*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.gif"]
+        for pat in patterns:
+            if recursive:
+                targets.extend(src.rglob(pat))
+            else:
+                targets.extend(src.glob(pat))
+        targets = sorted(set(targets))
+
+    if not targets:
+        console.print(f"[yellow]在 {src} 下没找到可入库的文件[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"\n[bold]准备入库 {len(targets)} 个文件:[/bold]")
+    for f in targets:
+        t = detect_doc_type(f)
+        console.print(f"  [dim]{t:>5}[/dim]  {f.name}")
+    console.print()
+
+    results: list[dict] = []
+    t0 = time.time()
+    for idx, f in enumerate(targets, 1):
+        console.rule(f"[cyan]({idx}/{len(targets)}) {f.name}[/cyan]")
+        try:
+            res = pipeline.ingest_doc(
+                f,
+                cfg_path=config,
+                force=force,
+                log_level=log_level,
+            )
+            res["status"] = "✅"
+            results.append(res)
+        except KeyboardInterrupt:
+            console.print("\n[red]用户中断[/red]")
+            break
+        except Exception as e:
+            console.print(f"[red]❌ {type(e).__name__}: {e}[/red]")
+            console.print(
+                "[dim]" + traceback.format_exc(limit=3)[-600:] + "[/dim]"
+            )
+            results.append(
+                {
+                    "status": "❌",
+                    "doc_id": "",
+                    "source_type": detect_doc_type(f) or "?",
+                    "chunks_new": 0,
+                    "chunks_deleted": 0,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+
+    # 汇总
+    console.rule("[bold]入库汇总[/bold]")
+    table = Table(show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("status")
+    table.add_column("type", style="magenta", width=6)
+    table.add_column("doc_id", style="cyan", max_width=40)
+    table.add_column("删", justify="right")
+    table.add_column("新", justify="right", style="green")
+    for i, r in enumerate(results, 1):
+        table.add_row(
+            str(i),
+            r.get("status", "?"),
+            r.get("source_type", ""),
+            r.get("doc_id", "") or r.get("error", "")[:40],
+            str(r.get("chunks_deleted", 0)),
+            str(r.get("chunks_new", 0)),
+        )
+    console.print(table)
+    ok = sum(1 for r in results if r.get("status", "").startswith("✅"))
+    fail = sum(1 for r in results if r.get("status", "").startswith("❌"))
+    console.print(
+        f"\n[bold]总计[/bold] {len(results)}, "
+        f"[green]ok {ok}[/green], [red]fail {fail}[/red], "
+        f"[dim]{(time.time() - t0) / 60:.1f} min[/dim]"
+    )
+
+
+docs_app = typer.Typer(
+    name="docs",
+    help="管理独立文档(PDF / 图片)— 和 kb ingest-doc 配套",
+    no_args_is_help=True,
+)
+app.add_typer(docs_app, name="docs")
+
+
+@docs_app.command("list")
+def docs_list(
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+):
+    """列出 kb/docs/ 下所有已入库文档。"""
+    items = pipeline.list_docs(cfg_path=config)
+    if not items:
+        console.print("[yellow]还没有入库文档。试试 `kb ingest-doc <file>`[/yellow]")
+        return
+    table = Table(title="Docs in KB")
+    table.add_column("doc_id", style="cyan", max_width=40)
+    table.add_column("type", style="magenta", width=6)
+    table.add_column("title", max_width=40)
+    table.add_column("pages", justify="right")
+    table.add_column("emb", style="green", width=4)
+    table.add_column("ingested_at", style="dim")
+    for m in items:
+        flag = "✓" if m.get("has_embeddings") else "-"
+        table.add_row(
+            m.get("doc_id", ""),
+            m.get("source_type", ""),
+            m.get("title", ""),
+            str(m.get("page_count", 0)),
+            flag,
+            (m.get("ingested_at") or "")[:19],
+        )
+    console.print(table)
+
+
+@docs_app.command("remove")
+def docs_remove(
+    doc_id: str = typer.Argument(..., help="要删除的 doc_id"),
+    keep_files: bool = typer.Option(
+        False, "--keep-files", help="只清向量库,保留 kb/docs/<doc_id>/ 文件"
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+):
+    """从向量库和 kb/docs/ 中删除一个文档。"""
+    import shutil as _shutil
+
+    cfg = load_config(config)
+    docs_root = Path(cfg["paths"].get("docs_dir", "kb/docs"))
+    ddir = docs_root / doc_id
+
+    deleted = chroma_client.delete_by_source_id(
+        doc_id, cfg["paths"]["chroma_dir"]
+    )
+    console.print(f"向量库:删除 [bold]{deleted}[/bold] 个 chunks")
+    if not keep_files and ddir.exists():
+        _shutil.rmtree(ddir)
+        console.print(f"文件:删除目录 {ddir}")
+    elif not ddir.exists():
+        console.print(f"[yellow]目录不存在(可能已清):{ddir}[/yellow]")
+
+
+# ========= kb aliases 子命令组 =========
+aliases_app = typer.Typer(
+    name="aliases",
+    help="管理同义词词典 — 查询时做概念扩展,提升召回",
+    no_args_is_help=True,
+)
+app.add_typer(aliases_app, name="aliases")
+
+
+def _resolve_aliases_path(cfg: dict) -> Path | None:
+    ap = cfg.get("retrieval", {}).get("aliases_path")
+    if not ap:
+        return None
+    apath = Path(ap)
+    if not apath.is_absolute():
+        apath = Path(cfg.get("_project_root", ".")) / apath
+    return apath
+
+
+@aliases_app.command("list")
+def aliases_list(
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+):
+    """列出当前词典所有组。"""
+    from .retrieval.aliases import load_aliases
+
+    cfg = load_config(config)
+    apath = _resolve_aliases_path(cfg)
+    if not apath:
+        console.print(
+            "[yellow]retrieval.aliases_path 未配置。"
+            "在 configs/default.yaml 里加 retrieval.aliases_path。[/yellow]"
+        )
+        return
+    if not apath.exists():
+        console.print(f"[yellow]词典不存在: {apath}[/yellow]")
+        console.print(
+            "新建一个模板文件往里加词,或跑 `kb aliases check \"<query>\"` 先预览。"
+        )
+        return
+
+    lookup = load_aliases(apath)
+    if not lookup:
+        console.print(f"[yellow]词典为空: {apath}[/yellow]")
+        return
+
+    # lookup 是 term→group,每组多次出现,用 id 去重
+    seen_groups = set()
+    groups: list[list[str]] = []
+    for group in lookup.values():
+        gid = id(group)
+        if gid in seen_groups:
+            continue
+        seen_groups.add(gid)
+        groups.append(group)
+
+    table = Table(title=f"Aliases @ {apath}", show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Canonical", style="cyan")
+    table.add_column("Aliases", style="green")
+    for i, g in enumerate(groups, 1):
+        table.add_row(str(i), g[0], ", ".join(g[1:]) if len(g) > 1 else "-")
+    console.print(table)
+    console.print(
+        f"\n[dim]共 {len(groups)} 组 / {len(lookup)} 个词[/dim]"
+    )
+
+
+@aliases_app.command("check")
+def aliases_check(
+    query: str = typer.Argument(..., help="想预览扩展的查询文本"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+):
+    """预览一个查询被词典扩展后长什么样(不真跑检索)。"""
+    from .retrieval.aliases import preview_expansion
+
+    cfg = load_config(config)
+    apath = _resolve_aliases_path(cfg)
+    result = preview_expansion(query, apath)
+
+    console.print(f"[bold]原始:[/bold] {result['original']}")
+    if not result["hits"]:
+        console.print("[yellow]未命中词典中任何词,查询不会扩展。[/yellow]")
+        return
+    console.print(
+        f"[bold]命中:[/bold] [cyan]{', '.join(result['hits'])}[/cyan]"
+    )
+    console.print(
+        f"[bold]新增:[/bold] [green]{', '.join(result['added']) or '(无)'}[/green]"
+    )
+    console.print(f"[bold]扩展后:[/bold] {result['expanded']}")
+
+
+@aliases_app.command("suggest")
+def aliases_suggest(
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help="输出文件,默认写到 configs/aliases.suggested.yaml",
+    ),
+    sample_size: int = typer.Option(
+        80, "--sample-size", help="采样几个 chunk 喂给 Claude(默认 80)"
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model",
+        help="claude 模型(默认复用 structuring.claude_model,再兜底 sonnet)",
+    ),
+    timeout_sec: int = typer.Option(
+        240, "--timeout", help="Claude CLI 超时秒数(默认 240)"
+    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
+):
+    """从向量库语料里自动抽专业术语,生成 aliases.yaml 建议稿。
+
+    流程:ChromaDB 采样 → Claude CLI → 输出 YAML 建议到 --out 路径。
+    ⚠️ 这是建议稿,**不是**正式词典。审阅后手工合并到 configs/aliases.yaml。
+
+    示例:
+        kb aliases suggest                          # 写到 configs/aliases.suggested.yaml
+        kb aliases suggest --sample-size 120        # 采更多样本,Claude 上下文压力大一些
+        kb aliases suggest --model opus             # 用 opus 更细致(慢 3-5x)
+        kb aliases suggest -o /tmp/terms.yaml       # 自定义输出路径
+    """
+    from .retrieval.extract_terms import suggest_aliases
+
+    cfg = load_config(config)
+    # 默认模型:ask.claude_model → structuring.claude_model → sonnet
+    if model is None:
+        model = (
+            cfg.get("ask", {}).get("claude_model")
+            or cfg.get("structuring", {}).get("claude_model")
+            or "sonnet"
+        )
+    # 默认输出路径:configs/aliases.suggested.yaml (和 aliases.yaml 同目录)
+    if out is None:
+        apath = _resolve_aliases_path(cfg)
+        if apath:
+            out = apath.parent / "aliases.suggested.yaml"
+        else:
+            out = Path("configs/aliases.suggested.yaml")
+
+    with console.status(
+        f"[cyan]采样 → Claude ({model}) 抽术语...[/cyan]", spinner="dots"
+    ):
+        try:
+            result = suggest_aliases(
+                chroma_path=cfg["paths"]["chroma_dir"],
+                out_path=out,
+                claude_model=model,
+                sample_size=sample_size,
+                timeout_sec=timeout_sec,
+            )
+        except Exception as e:
+            console.print(f"[red]失败:[/red] {type(e).__name__}: {e}")
+            raise typer.Exit(1)
+
+    console.print(
+        f"[green]✅ 已生成建议稿:[/green] {result['out_path']}\n"
+        f"  采样 {result['sample_size']}/{result['total_chunks']} chunks, "
+        f"prompt {result['prompt_chars'] // 1000}k chars, "
+        f"输出 {result['raw_output_chars']} chars"
+    )
+    if not result["parsed_ok"]:
+        console.print(
+            "[yellow]⚠️  Claude 输出不是合法 YAML。"
+            "打开文件手工修正,或改 --model opus 重跑。[/yellow]"
+        )
+    console.print(
+        "\n[dim]下一步:[/dim]\n"
+        f"  1. 打开 {result['out_path']} 看看有没有垃圾词\n"
+        "  2. 挑想要的条目,**手工合并**到 configs/aliases.yaml\n"
+        "  3. `kb aliases list` 确认最终词典生效\n"
+        "  4. `kb aliases check \"<你常用的查询>\"` 验证扩展效果"
+    )
 
 
 if __name__ == "__main__":

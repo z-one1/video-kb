@@ -1,0 +1,28 @@
+# 概念别名词典 — video-kb 查询时做同义词扩展
+#
+# 格式:每组一个 canonical(规范词)+ aliases(同义词列表)
+# 查询命中任一词(canonical 或 aliases)就会触发整组扩展,双向生效。
+#
+# 用法:
+#   kb aliases list                    # 看当前词典
+#   kb aliases check "你的查询文本"    # 预览扩展后的查询
+#   kb ask "..." --no-aliases          # 临时禁用扩展
+#
+# 维护建议:
+# - 只加"用户查询语 ↔ 视频讲师用语"不一致的词(最有价值)
+# - 一组 3-6 个词足够,太多会稀释信号
+# - 中英混排完全没问题 — bge-m3 是多语种模型
+#
+# ========== 以下为示例,请按你自己视频内容替换 ==========
+
+# - canonical: 入场信号
+#   aliases: [entry signal, entry, trigger, setup, entry model]
+#
+# - canonical: 关键价位
+#   aliases: [key level, POI, point of interest, liquidity level]
+#
+# - canonical: 止损
+#   aliases: [stop loss, SL, invalidation, risk]
+#
+# - canonical: 蜡烛形态
+#   aliases: [candle, candlestick, price action, bar]

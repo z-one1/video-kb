@@ -27,6 +27,7 @@ pip-wheel-metadata/
 # 注意 leading slash — 只匹配项目根目录下的 kb/,不会误伤 src/kb/ 源代码
 /kb/
 /claude_upload/
+/backups/
 
 # -------- Logs / tmp / scratch --------
 *.log

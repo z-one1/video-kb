@@ -103,12 +103,36 @@ class Notes(BaseModel):
 
 
 class Chunk(BaseModel):
-    """分块后的文本单元 — 准备嵌入用"""
+    """分块后的文本单元 — 准备嵌入用。
+
+    支持多源 (视频 / PDF / 独立图片) — source_type 区分,其他字段按需填:
+      - video: start_sec / end_sec / section_title / has_visual
+      - pdf:   page_num / source_path(如 'notes.pdf')
+      - image: source_path(如 'chart.png'),has_visual=True
+    video_id 字段对所有源都复用为 source_id(doc 侧用 'pdf_<hash>' / 'img_<hash>' 前缀)。
+    """
 
     chunk_id: str
-    video_id: str
+    video_id: str  # 实际语义 = source_id,保留字段名以兼容旧数据
     text: str
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     section_title: Optional[str] = None
     has_visual: bool = False
+    # --- 多源扩展(向后兼容,旧数据 source_type 默认为 'video')---
+    source_type: str = "video"  # 'video' | 'pdf' | 'image'
+    page_num: Optional[int] = None  # 仅 PDF
+    source_path: Optional[str] = None  # 原始文件名,用于 doc 类型的引用显示
+
+
+class DocMeta(BaseModel):
+    """独立文档 (PDF/图片) 元数据,保存在 kb/docs/<doc_id>/meta.yaml"""
+
+    doc_id: str
+    source_type: Literal["pdf", "image"]
+    source_path: str  # 原始文件绝对路径
+    title: str = ""  # 显示用文件名(去扩展名)
+    page_count: int = 0  # PDF 的页数;image 固定 1
+    ingested_at: str = ""  # ISO 时间
+    has_text: bool = False  # PDF 已抽文本 / image 已描述
+    has_embeddings: bool = False
