@@ -92,6 +92,44 @@ Every `[ep.N @ mm:ss]` is a real back-reference — open the video at that times
 
 ---
 
+## Ingest PDFs and images
+
+Videos aren't the only thing that can go in. PDFs (lecture notes, papers, trading journals) and standalone images (chart screenshots, whiteboard photos, slides) land in the same ChromaDB as videos, and `kb ask` retrieves across all of them:
+
+```bash
+# Single PDF — default uses Claude CLI to extract (OCRs scans, describes charts, preserves tables)
+kb ingest-doc trading_notes.pdf
+
+# Large text-heavy PDF — skip Claude, use pypdf for a fast free pass
+kb ingest-doc thesis.pdf --pdf-provider pypdf
+
+# Single image — Claude vision describes the picture + transcribes any on-screen text
+kb ingest-doc chart_screenshot.png
+
+# Whole folder, recursive — picks up every .pdf / .png / .jpg / .jpeg / .webp / .bmp / .gif
+kb ingest-doc ~/Desktop/trading_refs/
+```
+
+Citations in the answer tell you which source each claim came from:
+
+| Format | Source |
+|---|---|
+| `[ep.3 @ 12:45]` | Video episode 3, 12 min 45 sec |
+| `[trading_notes.pdf p.7]` | PDF, page 7 |
+| `[img: chart_screenshot.png]` | Standalone image |
+
+Manage ingested documents:
+
+```bash
+kb docs list                  # List every ingested PDF/image with chunk counts
+kb docs remove pdf_<doc_id>   # Delete a doc's chunks from ChromaDB (confirms first)
+kb docs remove pdf_<doc_id> -y  # Skip the confirmation (for scripts)
+```
+
+> ⚠️ **Cost note:** The Claude CLI provider uses your Max-plan allotment per PDF — roughly a few hundred tokens per page. Worth it for scanned PDFs and documents full of charts/tables. For pure-text PDFs (papers, books), `--pdf-provider pypdf` runs locally for free. Set `ingest_doc.pdf_provider` in `configs/default.yaml` to change the default.
+
+---
+
 ## Use it from inside Claude (MCP)
 
 The repo ships with a built-in MCP server that exposes four tools to Claude:
