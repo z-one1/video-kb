@@ -500,3 +500,119 @@ def test_cli_pdf_provider_default_is_none(tmp_path: Path, monkeypatch):
     result = CliRunner().invoke(app, ["ingest-doc", str(pdf)])
     assert result.exit_code == 0, result.output
     assert captured.get("pdf_provider") is None
+
+
+# ============ kb docs remove — confirmation behavior (Phase 5) ============
+
+
+def _patch_docs_remove_deps(monkeypatch, tmp_path):
+    """把 cli.docs_remove 依赖的 load_config + chroma ops + rmtree 都 stub 掉,
+    让我们能单独测 confirm 流程。返回一个 call-log dict。"""
+    from kb import cli as cli_mod
+
+    log_calls: dict[str, Any] = {"deleted": 0, "rmtree_called_with": None}
+
+    # 1. load_config → 返回指向 tmp 的 config
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config",
+        lambda _c: {
+            "paths": {
+                "docs_dir": str(tmp_path / "docs"),
+                "chroma_dir": str(tmp_path / "db"),
+            }
+        },
+    )
+
+    # 2. chroma_client — 假装有 3 个 chunks,delete 返回 3
+    monkeypatch.setattr(
+        cli_mod.chroma_client,
+        "count_by_source_id",
+        lambda *a, **kw: 3,
+    )
+
+    def fake_delete(*a, **kw):
+        log_calls["deleted"] = 3
+        return 3
+
+    monkeypatch.setattr(cli_mod.chroma_client, "delete_by_source_id", fake_delete)
+
+    # 3. rmtree — 只记录调用,不真删
+    import shutil as _sh
+
+    def fake_rmtree(path, *a, **kw):
+        log_calls["rmtree_called_with"] = str(path)
+
+    monkeypatch.setattr(_sh, "rmtree", fake_rmtree)
+
+    # 4. 造一个假的 doc dir,让 ddir.exists() 为 True
+    fake_ddir = tmp_path / "docs" / "pdf_fake_deadbeef"
+    fake_ddir.mkdir(parents=True)
+
+    return log_calls
+
+
+def test_docs_remove_aborts_on_no(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from kb.cli import app
+
+    log_calls = _patch_docs_remove_deps(monkeypatch, tmp_path)
+
+    # 模拟用户输入 'n'
+    result = CliRunner().invoke(
+        app, ["docs", "remove", "pdf_fake_deadbeef"], input="n\n"
+    )
+    # typer.confirm(abort=True) 答 n → 非零退出
+    assert result.exit_code != 0
+    # 没走到 delete / rmtree
+    assert log_calls["deleted"] == 0
+    assert log_calls["rmtree_called_with"] is None
+
+
+def test_docs_remove_proceeds_on_yes(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from kb.cli import app
+
+    log_calls = _patch_docs_remove_deps(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app, ["docs", "remove", "pdf_fake_deadbeef"], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert log_calls["deleted"] == 3
+    assert log_calls["rmtree_called_with"] is not None
+
+
+def test_docs_remove_yes_flag_skips_prompt(tmp_path, monkeypatch):
+    """-y 短 flag 应该直接删,无 prompt(input 给空也不挂)。"""
+    from typer.testing import CliRunner
+
+    from kb.cli import app
+
+    log_calls = _patch_docs_remove_deps(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app, ["docs", "remove", "pdf_fake_deadbeef", "-y"]
+    )
+    assert result.exit_code == 0, result.output
+    assert log_calls["deleted"] == 3
+    assert "确认继续" not in result.output  # 没有问过
+
+
+def test_docs_remove_keep_files_preserves_dir(tmp_path, monkeypatch):
+    """--keep-files 应清向量库但不 rmtree。"""
+    from typer.testing import CliRunner
+
+    from kb.cli import app
+
+    log_calls = _patch_docs_remove_deps(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        ["docs", "remove", "pdf_fake_deadbeef", "-y", "--keep-files"],
+    )
+    assert result.exit_code == 0, result.output
+    assert log_calls["deleted"] == 3
+    assert log_calls["rmtree_called_with"] is None

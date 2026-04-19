@@ -146,6 +146,14 @@ def delete_by_video_id(video_id: str, db_path: Path | str) -> int:
 delete_by_source_id = delete_by_video_id
 
 
+def count_by_source_id(source_id: str, db_path: Path | str) -> int:
+    """数某个 source 下有多少 chunks — 删除前给用户看范围用。"""
+    client = _client(db_path)
+    col = client.get_or_create_collection(COLLECTION_NAME)
+    existing = col.get(where={"video_id": source_id})
+    return len(existing.get("ids", []) or [])
+
+
 def stats(db_path: Path | str) -> dict[str, Any]:
     client = _client(db_path)
     col = client.get_or_create_collection(COLLECTION_NAME)

@@ -677,6 +677,10 @@ def docs_remove(
     keep_files: bool = typer.Option(
         False, "--keep-files", help="只清向量库,保留 kb/docs/<doc_id>/ 文件"
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="跳过确认提示,直接删(脚本用)",
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c"),
 ):
     """从向量库和 kb/docs/ 中删除一个文档。"""
@@ -685,6 +689,23 @@ def docs_remove(
     cfg = load_config(config)
     docs_root = Path(cfg["paths"].get("docs_dir", "kb/docs"))
     ddir = docs_root / doc_id
+
+    # 先提示用户,显示即将删除的范围
+    chunks_to_delete = chroma_client.count_by_source_id(
+        doc_id, cfg["paths"]["chroma_dir"]
+    )
+    files_action = (
+        "保留文件"
+        if keep_files
+        else (f"删除目录 {ddir}" if ddir.exists() else "无文件可删")
+    )
+    console.print(
+        f"即将删除:[bold cyan]{doc_id}[/bold cyan]\n"
+        f"  向量库 chunks: [bold]{chunks_to_delete}[/bold]\n"
+        f"  文件: {files_action}"
+    )
+    if not yes:
+        typer.confirm("确认继续?", abort=True)
 
     deleted = chroma_client.delete_by_source_id(
         doc_id, cfg["paths"]["chroma_dir"]
