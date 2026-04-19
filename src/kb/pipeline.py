@@ -246,81 +246,133 @@ def ingest(
 
 def reindex(
     video_id: str | None = None,
+    doc_id: str | None = None,
+    skip_videos: bool = False,
+    skip_docs: bool = False,
     cfg_path: Path | str | None = None,
     log_level: str = "INFO",
 ) -> list[dict[str, Any]]:
-    """复用已有的 enriched.json + notes.json 重新切块+嵌入+入库。
+    """复用已有提取产物重新切块+嵌入+入库 — 视频 + 独立文档。
 
-    适用场景:chunking 参数调整(window/visual cap/min_chunk_chars)后,
-    不想重跑 STT/Vision/LLM,只想重新切块。
+    适用场景:chunking 参数调整(window/visual cap/min_chunk_chars/pdf_chunk_size)
+    后,不想重跑 STT/Vision/LLM/Claude-CLI,只想重新切块。
 
     Args:
-        video_id: 指定 video_id 只重建单个;None 则重建所有 kb/videos/* 下可用的。
+        video_id: 指定 video_id 只重建单个视频(互斥 doc_id)。
+        doc_id:   指定 doc_id  只重建单个文档(互斥 video_id)。
+        skip_videos: 不处理 kb/videos/*(当 video_id/doc_id 都不指定时有效)。
+        skip_docs:   不处理 kb/docs/*  (当 video_id/doc_id 都不指定时有效)。
+        cfg_path:  配置文件路径。
 
-    每个视频的步骤:
+    行为矩阵(video_id / doc_id / skip_* 组合):
+        video_id 指定 → 只重建该视频
+        doc_id   指定 → 只重建该文档
+        都没指定 + skip_videos=False + skip_docs=False → 全部重建
+        都没指定 + skip_docs=True  → 只重建所有视频
+        都没指定 + skip_videos=True → 只重建所有文档
+
+    视频流程(每个):
       1. load notes.json + enriched.json(两者都必须存在)
       2. chunking.chunk_notes(...)  — 用当前 cfg 重算
-      3. chroma_client.delete_by_video_id(video_id)  — 清旧
+      3. chroma_client.delete_by_source_id(...) 清旧
       4. bge.embed_texts(...) + chroma_client.upsert_chunks(...)
       5. 重写 chunks.jsonl
+
+    文档流程(每个):
+      1. load meta.yaml + pages.jsonl(PDF) / description.json(image)
+      2. ingest_docs.chunk_pdf / chunk_image(...) — 用当前 cfg 重算
+      3. chroma_client.delete_by_source_id(...) 清旧
+      4. bge.embed_texts(...) + chroma_client.upsert_chunks(...)
+      5. 重写 chunks.jsonl
+
+    返回 list[dict],每条:
+        {source_id, source_type, chunks_new, chunks_deleted}
+        source_type ∈ {"video", "pdf", "image"}
+        (向后兼容,同时设置 video_id=source_id)
     """
     from .schemas import EnrichedSegment
 
     setup_logging(log_level)
     cfg = load_config(cfg_path)
     videos_root = Path(cfg["paths"]["videos_dir"])
+    docs_root = Path(cfg["paths"].get("docs_dir", "kb/docs"))
     chroma_path = Path(cfg["paths"]["chroma_dir"])
 
-    # 找要处理的 video 列表
-    targets: list[Path] = []
-    if video_id:
-        vdir = videos_root / video_id
-        if not vdir.exists():
-            raise FileNotFoundError(f"video dir not found: {vdir}")
-        targets.append(vdir)
-    else:
-        if not videos_root.exists():
-            log.warning(f"videos_root not found: {videos_root}")
-            return []
-        for vdir in sorted(videos_root.iterdir()):
-            if not vdir.is_dir():
-                continue
-            if (vdir / "notes.json").exists() and (vdir / "enriched.json").exists():
-                targets.append(vdir)
+    if video_id and doc_id:
+        raise ValueError("video_id 和 doc_id 不能同时指定")
 
-    if not targets:
-        log.warning("No videos to reindex (need notes.json + enriched.json)")
+    # 当指定 video_id 或 doc_id 时,skip_* 被忽略(只做显式那个)
+    targeted = bool(video_id or doc_id)
+    process_videos = (not targeted and not skip_videos) or bool(video_id)
+    process_docs = (not targeted and not skip_docs) or bool(doc_id)
+
+    # ========== 1. 找视频目标 ==========
+    video_targets: list[Path] = []
+    if process_videos:
+        if video_id:
+            vdir = videos_root / video_id
+            if not vdir.exists():
+                raise FileNotFoundError(f"video dir not found: {vdir}")
+            video_targets.append(vdir)
+        elif videos_root.exists():
+            for vdir in sorted(videos_root.iterdir()):
+                if not vdir.is_dir():
+                    continue
+                if (vdir / "notes.json").exists() and (vdir / "enriched.json").exists():
+                    video_targets.append(vdir)
+
+    # ========== 2. 找文档目标 ==========
+    doc_targets: list[Path] = []
+    if process_docs:
+        if doc_id:
+            ddir = docs_root / doc_id
+            if not ddir.exists():
+                raise FileNotFoundError(f"doc dir not found: {ddir}")
+            doc_targets.append(ddir)
+        elif docs_root.exists():
+            for ddir in sorted(docs_root.iterdir()):
+                if not ddir.is_dir():
+                    continue
+                if (ddir / "meta.yaml").exists():
+                    doc_targets.append(ddir)
+
+    if not video_targets and not doc_targets:
+        log.warning(
+            "No targets to reindex "
+            "(videos need notes.json + enriched.json; docs need meta.yaml)"
+        )
         return []
 
     log.info("=" * 60)
-    log.info(f"Reindex: {len(targets)} video(s)")
+    log.info(
+        f"Reindex: {len(video_targets)} video(s) + {len(doc_targets)} doc(s)"
+    )
     log.info("=" * 60)
 
     results: list[dict[str, Any]] = []
-    for vdir in targets:
+
+    # ========== 3. 视频循环 ==========
+    for vdir in video_targets:
         vid = vdir.name
-        log.info(f"--- reindex {vid} ---")
+        log.info(f"--- reindex video {vid} ---")
 
         meta = _load_meta(vdir)
         if meta is None:
             log.warning(f"{vid}: meta.yaml missing, skip")
             continue
 
-        # 加载 enriched + notes
         with open(vdir / "enriched.json", encoding="utf-8") as f:
             enriched_raw = json.load(f)
         enriched = [EnrichedSegment(**d) for d in enriched_raw]
         with open(vdir / "notes.json", encoding="utf-8") as f:
             notes = Notes(**json.load(f))
 
-        # 重新切块
         chunks = chunking.chunk_notes(notes, enriched, meta.video_id, cfg["embedding"])
         if not chunks:
             log.warning(f"{vid}: produced 0 chunks, skip")
             continue
 
-        # 清旧 + 写新
-        deleted = chroma_client.delete_by_video_id(meta.video_id, chroma_path)
+        deleted = chroma_client.delete_by_source_id(meta.video_id, chroma_path)
         embeddings = bge.embed_texts([c.text for c in chunks], cfg["embedding"])
         chroma_client.upsert_chunks(
             chunks,
@@ -329,22 +381,98 @@ def reindex(
             video_meta={"title": meta.title, "source": meta.source},
         )
 
-        # 覆盖 chunks.jsonl
         with open(vdir / "chunks.jsonl", "w", encoding="utf-8") as f:
             for c in chunks:
                 f.write(json.dumps(c.model_dump(), ensure_ascii=False) + "\n")
 
         results.append(
             {
-                "video_id": vid,
+                "source_id": vid,
+                "video_id": vid,  # backward compat
+                "source_type": "video",
                 "chunks_new": len(chunks),
                 "chunks_deleted": deleted,
             }
         )
         log.info(f"{vid}: {deleted} → {len(chunks)} chunks")
 
+    # ========== 4. 文档循环 ==========
+    ingest_doc_cfg = cfg.get("ingest_doc", {})
+    for ddir in doc_targets:
+        did = ddir.name
+        log.info(f"--- reindex doc {did} ---")
+
+        dmeta = ingest_docs.load_doc_meta(ddir)
+        if dmeta is None:
+            log.warning(f"{did}: meta.yaml missing, skip")
+            continue
+
+        chunks: list[Any] = []
+        if dmeta.source_type == "pdf":
+            pages_path = ddir / "pages.jsonl"
+            if not pages_path.exists():
+                log.warning(
+                    f"{did}: pages.jsonl missing — 需要先跑过 kb ingest-doc,skip"
+                )
+                continue
+            with open(pages_path, encoding="utf-8") as f:
+                pages = [json.loads(line) for line in f if line.strip()]
+            chunks = ingest_docs.chunk_pdf(
+                pages, dmeta.doc_id, dmeta.source_path, ingest_doc_cfg
+            )
+        elif dmeta.source_type == "image":
+            desc_path = ddir / "description.json"
+            if not desc_path.exists():
+                log.warning(
+                    f"{did}: description.json missing — 需要先跑过 kb ingest-doc,skip"
+                )
+                continue
+            with open(desc_path, encoding="utf-8") as f:
+                description = json.load(f)
+            chunks = ingest_docs.chunk_image(
+                description, dmeta.doc_id, dmeta.source_path
+            )
+        else:
+            log.warning(f"{did}: unknown source_type={dmeta.source_type}, skip")
+            continue
+
+        if not chunks:
+            log.warning(f"{did}: produced 0 chunks, skip")
+            continue
+
+        deleted = chroma_client.delete_by_source_id(dmeta.doc_id, chroma_path)
+        embeddings = bge.embed_texts([c.text for c in chunks], cfg["embedding"])
+        chroma_client.upsert_chunks(
+            chunks,
+            embeddings,
+            chroma_path,
+            video_meta={"title": dmeta.title, "source": dmeta.source_type},
+        )
+
+        with open(ddir / "chunks.jsonl", "w", encoding="utf-8") as f:
+            for c in chunks:
+                f.write(json.dumps(c.model_dump(), ensure_ascii=False) + "\n")
+
+        dmeta.has_embeddings = True
+        ingest_docs.save_doc_meta(dmeta, ddir)
+
+        results.append(
+            {
+                "source_id": did,
+                "video_id": did,  # backward compat
+                "source_type": dmeta.source_type,
+                "chunks_new": len(chunks),
+                "chunks_deleted": deleted,
+            }
+        )
+        log.info(f"{did}: {deleted} → {len(chunks)} chunks")
+
     log.info("=" * 60)
-    log.info(f"✅ Reindex done: {len(results)} video(s)")
+    log.info(
+        f"✅ Reindex done: {len(results)} target(s) "
+        f"({sum(1 for r in results if r['source_type'] == 'video')} video, "
+        f"{sum(1 for r in results if r['source_type'] != 'video')} doc)"
+    )
     log.info("=" * 60)
     return results
 

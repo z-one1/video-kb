@@ -461,23 +461,49 @@ def export(
 
 @app.command()
 def reindex(
-    video_id: Optional[str] = typer.Argument(
-        None, help="要重建的 video_id;不填则重建所有 kb/videos/* 下可用的"
+    source_id: Optional[str] = typer.Argument(
+        None,
+        help="要重建的 video_id 或 doc_id;不填则全量重建(videos + docs)",
+    ),
+    skip_videos: bool = typer.Option(
+        False, "--skip-videos", help="只重建 kb/docs/*,跳过视频"
+    ),
+    skip_docs: bool = typer.Option(
+        False, "--skip-docs", help="只重建 kb/videos/*,跳过独立文档"
     ),
     config: Optional[Path] = typer.Option(None, "--config", "-c"),
     log_level: str = typer.Option("INFO", "--log"),
 ):
-    """只重切块+重嵌入,复用已有 enriched.json + notes.json。
+    """只重切块+重嵌入,复用已有提取产物(enriched.json / pages.jsonl 等)。
 
     用法:
-        kb reindex                   # 全量重建
-        kb reindex <video_id>        # 只重建一个
+        kb reindex                      # 全量重建(videos + docs)
+        kb reindex <video_id>           # 只重建一个视频
+        kb reindex pdf_xxx              # 只重建一个 PDF(前缀自动识别)
+        kb reindex img_xxx              # 只重建一张图
+        kb reindex --skip-docs          # 只重建所有视频
+        kb reindex --skip-videos        # 只重建所有独立文档
 
-    典型场景:调整了 embedding.min_chunk_chars / max_visuals_per_window
-    等参数,想应用到现有 KB,但不想重跑 STT/Vision/LLM。
+    典型场景:
+    - 调整 embedding.min_chunk_chars / max_visuals_per_window → `kb reindex`
+    - 调整 ingest_doc.pdf_chunk_size → `kb reindex --skip-videos`
+
+    不会重跑 STT/Vision/LLM/Claude-CLI,只重新切块 → 零 tokens 成本。
     """
+    # 按前缀自动分流到 video_id / doc_id
+    video_id = None
+    doc_id = None
+    if source_id:
+        if source_id.startswith(("pdf_", "img_")):
+            doc_id = source_id
+        else:
+            video_id = source_id
+
     results = pipeline.reindex(
         video_id=video_id,
+        doc_id=doc_id,
+        skip_videos=skip_videos,
+        skip_docs=skip_docs,
         cfg_path=config,
         log_level=log_level,
     )
@@ -487,7 +513,8 @@ def reindex(
 
     table = Table(title="Reindex 结果", show_lines=False)
     table.add_column("#", style="dim", width=3)
-    table.add_column("video_id", style="cyan")
+    table.add_column("type", style="magenta", width=6)
+    table.add_column("source_id", style="cyan")
     table.add_column("删掉", justify="right")
     table.add_column("新增", justify="right", style="green")
     table.add_column("Δ", justify="right")
@@ -496,14 +523,18 @@ def reindex(
         sign = "+" if delta >= 0 else ""
         table.add_row(
             str(i),
-            r["video_id"],
+            r.get("source_type", "video"),
+            r.get("source_id", r.get("video_id", "")),
             str(r["chunks_deleted"]),
             str(r["chunks_new"]),
             f"{sign}{delta}",
         )
     console.print(table)
+    n_videos = sum(1 for r in results if r.get("source_type") == "video")
+    n_docs = len(results) - n_videos
     console.print(
-        f"\n[bold green]✅ 共重建 {len(results)} 个视频[/bold green]"
+        f"\n[bold green]✅ 共重建 {len(results)} 个 source "
+        f"({n_videos} video + {n_docs} doc)[/bold green]"
     )
 
 

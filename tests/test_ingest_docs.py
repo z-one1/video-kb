@@ -616,3 +616,218 @@ def test_docs_remove_keep_files_preserves_dir(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert log_calls["deleted"] == 3
     assert log_calls["rmtree_called_with"] is None
+
+
+# ============ reindex 覆盖 docs (Phase 4) ============
+
+
+def _write_yaml(path: Path, data: dict[str, Any]) -> None:
+    import yaml
+
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+
+
+def _setup_reindex_doc_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """造 kb/docs/pdf_foo/{meta.yaml,pages.jsonl} + kb/docs/img_bar/{meta.yaml,description.json}。"""
+    docs_root = tmp_path / "docs"
+    pdf_dir = docs_root / "pdf_foo_abcd1234"
+    img_dir = docs_root / "img_bar_efgh5678"
+    pdf_dir.mkdir(parents=True)
+    img_dir.mkdir(parents=True)
+
+    _write_yaml(
+        pdf_dir / "meta.yaml",
+        {
+            "doc_id": "pdf_foo_abcd1234",
+            "source_type": "pdf",
+            "source_path": str(tmp_path / "foo.pdf"),
+            "title": "foo.pdf",
+            "page_count": 2,
+            "ingested_at": "2026-04-19T00:00:00+00:00",
+            "has_text": True,
+            "has_embeddings": True,
+        },
+    )
+    with open(pdf_dir / "pages.jsonl", "w", encoding="utf-8") as f:
+        f.write(
+            json.dumps({"page_num": 1, "text": "Page one text " * 20}) + "\n"
+        )
+        f.write(
+            json.dumps({"page_num": 2, "text": "Page two text " * 20}) + "\n"
+        )
+
+    _write_yaml(
+        img_dir / "meta.yaml",
+        {
+            "doc_id": "img_bar_efgh5678",
+            "source_type": "image",
+            "source_path": str(tmp_path / "bar.png"),
+            "title": "bar.png",
+            "page_count": 1,
+            "ingested_at": "2026-04-19T00:00:00+00:00",
+            "has_text": True,
+            "has_embeddings": True,
+        },
+    )
+    with open(img_dir / "description.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {"description": "A chart", "extracted_text": "EURUSD 1.0850"}, f
+        )
+
+    return pdf_dir, img_dir
+
+
+def test_reindex_processes_pdf_and_image_docs(tmp_path, monkeypatch):
+    """reindex(skip_videos=True) 应对 PDF + 图片都重新切块 + 重嵌入 + upsert。"""
+    pdf_dir, img_dir = _setup_reindex_doc_fixture(tmp_path)
+
+    # 配置
+    cfg = {
+        "paths": {
+            "kb_root": str(tmp_path),
+            "videos_dir": str(tmp_path / "videos"),
+            "docs_dir": str(tmp_path / "docs"),
+            "chroma_dir": str(tmp_path / "db"),
+        },
+        "embedding": {"model": "bge-m3", "batch_size": 2},
+        "ingest_doc": {
+            "pdf_chunk_size": 400,
+            "pdf_chunk_overlap": 50,
+            "pdf_min_chunk_chars": 50,
+        },
+        "_project_root": str(tmp_path),
+    }
+
+    from kb import pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "load_config", lambda _c: cfg)
+
+    # Stub embedding + chroma I/O
+    monkeypatch.setattr(
+        pipeline_mod.bge, "embed_texts", lambda texts, _cfg: [[0.0] * 4 for _ in texts]
+    )
+
+    delete_calls: list[str] = []
+    upsert_calls: list[dict] = []
+
+    def fake_delete(source_id, _db):
+        delete_calls.append(source_id)
+        return 0
+
+    def fake_upsert(chunks, embeddings, _db, video_meta=None):
+        upsert_calls.append(
+            {
+                "n_chunks": len(chunks),
+                "source_id": chunks[0].video_id if chunks else None,
+                "source_type": chunks[0].source_type if chunks else None,
+                "video_meta": video_meta,
+            }
+        )
+
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "delete_by_source_id", fake_delete
+    )
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "delete_by_video_id", fake_delete
+    )
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "upsert_chunks", fake_upsert
+    )
+
+    results = pipeline_mod.reindex(skip_videos=True, cfg_path=None)
+
+    assert len(results) == 2
+    by_type = {r["source_type"]: r for r in results}
+    assert "pdf" in by_type
+    assert "image" in by_type
+    assert by_type["pdf"]["chunks_new"] >= 2  # 两页,每页至少一 chunk
+    assert by_type["image"]["chunks_new"] == 1
+
+    # chunks.jsonl 被写入
+    assert (pdf_dir / "chunks.jsonl").exists()
+    assert (img_dir / "chunks.jsonl").exists()
+    # 删除 + upsert 各调过 2 次(每个 doc 一次)
+    assert set(delete_calls) == {"pdf_foo_abcd1234", "img_bar_efgh5678"}
+    assert len(upsert_calls) == 2
+
+
+def test_reindex_single_doc_by_id(tmp_path, monkeypatch):
+    """reindex(doc_id=...) 应只处理那一个 doc,不碰其他。"""
+    pdf_dir, img_dir = _setup_reindex_doc_fixture(tmp_path)
+
+    cfg = {
+        "paths": {
+            "kb_root": str(tmp_path),
+            "videos_dir": str(tmp_path / "videos"),
+            "docs_dir": str(tmp_path / "docs"),
+            "chroma_dir": str(tmp_path / "db"),
+        },
+        "embedding": {"model": "bge-m3", "batch_size": 2},
+        "ingest_doc": {"pdf_chunk_size": 400, "pdf_min_chunk_chars": 50},
+        "_project_root": str(tmp_path),
+    }
+
+    from kb import pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "load_config", lambda _c: cfg)
+    monkeypatch.setattr(
+        pipeline_mod.bge, "embed_texts", lambda texts, _cfg: [[0.0] * 4 for _ in texts]
+    )
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "delete_by_source_id", lambda *a, **kw: 0
+    )
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "delete_by_video_id", lambda *a, **kw: 0
+    )
+    monkeypatch.setattr(
+        pipeline_mod.chroma_client, "upsert_chunks", lambda *a, **kw: None
+    )
+
+    results = pipeline_mod.reindex(doc_id="pdf_foo_abcd1234", cfg_path=None)
+    assert len(results) == 1
+    assert results[0]["source_type"] == "pdf"
+    assert results[0]["source_id"] == "pdf_foo_abcd1234"
+
+
+def test_reindex_rejects_both_ids(tmp_path, monkeypatch):
+    from kb import pipeline as pipeline_mod
+
+    monkeypatch.setattr(
+        pipeline_mod,
+        "load_config",
+        lambda _c: {
+            "paths": {
+                "kb_root": str(tmp_path),
+                "videos_dir": str(tmp_path / "videos"),
+                "docs_dir": str(tmp_path / "docs"),
+                "chroma_dir": str(tmp_path / "db"),
+            },
+            "embedding": {},
+            "_project_root": str(tmp_path),
+        },
+    )
+    with pytest.raises(ValueError, match="不能同时"):
+        pipeline_mod.reindex(video_id="v1", doc_id="pdf_x")
+
+
+def test_reindex_empty_dirs_returns_empty(tmp_path, monkeypatch):
+    from kb import pipeline as pipeline_mod
+
+    monkeypatch.setattr(
+        pipeline_mod,
+        "load_config",
+        lambda _c: {
+            "paths": {
+                "kb_root": str(tmp_path),
+                "videos_dir": str(tmp_path / "videos"),
+                "docs_dir": str(tmp_path / "docs"),
+                "chroma_dir": str(tmp_path / "db"),
+            },
+            "embedding": {},
+            "ingest_doc": {},
+            "_project_root": str(tmp_path),
+        },
+    )
+    # 两个 root 都不存在
+    assert pipeline_mod.reindex(cfg_path=None) == []
