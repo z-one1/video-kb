@@ -27,7 +27,7 @@ python - <<'PY'
 import importlib
 pkgs = [
     "yt_dlp", "faster_whisper", "scenedetect", "google.genai",
-    "sentence_transformers", "chromadb", "langchain_text_splitters",
+    "sentence_transformers", "chromadb",
     "pydantic", "typer", "rich", "yaml", "PIL", "dotenv",
 ]
 for p in pkgs:

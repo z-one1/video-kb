@@ -17,9 +17,8 @@ dependencies = [
     "Pillow>=10.0.0",
     # PDF 文本抽取 (kb ingest-doc)
     "pypdf>=5.0.0",
-    # 嵌入 + 分块
+    # 嵌入 + 分块 (切分器用自研 kb.embedding.splitter,避开 langchain → nltk → sklearn → pandas 链路)
     "sentence-transformers>=3.0",
-    "langchain-text-splitters>=0.3.0",
     # 向量库
     "chromadb>=0.5.0",
     # 通用

@@ -5,8 +5,11 @@ import logging
 from typing import Any
 
 from ..schemas import Chunk, EnrichedSegment, Notes
+from .splitter import recursive_char_split
 
 log = logging.getLogger("kb.embedding")
+
+_DEFAULT_SEPARATORS = ["\n\n", "\n", "。", ".", "!", "?", " ", ""]
 
 
 def chunk_notes(
@@ -19,19 +22,13 @@ def chunk_notes(
 
     每块带 metadata: section_title / start_sec / end_sec / has_visual
     """
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-    except ImportError as e:
-        raise ImportError("langchain-text-splitters 未安装") from e
-
     chunk_size = cfg.get("chunk_size", 500)
     chunk_overlap = cfg.get("chunk_overlap", 50)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", ".", "!", "?", " ", ""],
-    )
+    def split(text: str) -> list[str]:
+        return recursive_char_split(
+            text, chunk_size, chunk_overlap, _DEFAULT_SEPARATORS
+        )
 
     chunks: list[Chunk] = []
     counter = 0
@@ -44,7 +41,7 @@ def chunk_notes(
             f"{sec.summary}\n"
             + (f"关键概念: {', '.join(sec.concepts)}\n" if sec.concepts else "")
         )
-        for piece in splitter.split_text(sec_text):
+        for piece in split(sec_text):
             # 判断该章节覆盖的时间段内是否有视觉
             has_vis = any(
                 seg.visual_descriptions
@@ -82,7 +79,7 @@ def chunk_notes(
         if not current_texts or current_start is None:
             return
         block = " ".join(current_texts)
-        for piece in splitter.split_text(block):
+        for piece in split(block):
             # 找包含在当前窗口的章节标题
             sec_title = _find_section_title(notes, current_start, current_end)
             chunks.append(

@@ -134,8 +134,18 @@ def extract_pdf_pages_via_claude(
         f"Extracting PDF via Claude CLI: {pdf_path.name} (model={model}, "
         f"timeout={timeout_sec}s)"
     )
+    # --permission-mode bypassPermissions: 非交互 -p 会话必须显式跳权限检查,
+    # 否则 Claude 会拿 @pdf_path 触发 Read tool 然后卡在"请授权"上,subprocess
+    # 拿到的 stdout 是权限提示文本而不是我们要的 JSON。
+    # 用户主动敲 `kb ingest-doc <file>` 即为同意读该文件,故可直接 bypass。
     proc = subprocess.run(
-        [claude_bin, "-p", "--output-format", "text", "--model", model],
+        [
+            claude_bin,
+            "-p",
+            "--output-format", "text",
+            "--model", model,
+            "--permission-mode", "bypassPermissions",
+        ],
         input=prompt,
         text=True,
         capture_output=True,
@@ -148,9 +158,36 @@ def extract_pdf_pages_via_claude(
         )
 
     raw = (proc.stdout or "").strip()
+    _raise_if_permission_refusal(raw, pdf_path.name)
     pages = _parse_claude_pdf_json(raw, pdf_path.name)
     log.info(f"Claude extracted {len(pages)} pages from {pdf_path.name}")
     return pages
+
+
+# 识别 Claude CLI 吐回"请授权"这类拒读提示的关键词 — 做智能错误消息
+_PERMISSION_REFUSAL_MARKERS = (
+    "需要你授权", "授权读取", "权限提示", "无法访问", "没有权限",
+    "permission", "authorize", "cannot access", "don't have access",
+    "not allowed to",
+)
+
+
+def _raise_if_permission_refusal(raw: str, fname: str) -> None:
+    """Claude CLI 在 -p 模式下被权限系统拦住时,stdout 是中文/英文"请授权"提示,
+    不是我们要的 JSON。捕获这种情况并抛出可操作的错误消息。
+    """
+    head = raw[:300].lower()
+    if any(m.lower() in head for m in _PERMISSION_REFUSAL_MARKERS):
+        raise RuntimeError(
+            f"Claude CLI 被权限系统拦住了,没读到 {fname}。返回片段:\n"
+            f"  {raw[:200].strip()}\n\n"
+            f"修复方式(任选其一):\n"
+            f"  1. 确认 kb 已加了 --permission-mode bypassPermissions(本版本已加,"
+            f"     若仍报错,请 `pip install -e .` 重装或检查 claude CLI 版本 >= 2.x)\n"
+            f"  2. 在 shell 里先跑一次 `claude --allow-dangerously-skip-permissions` "
+            f"一次性授权,之后 subprocess 就不会被拦\n"
+            f"  3. 临时绕过:`kb ingest-doc {fname} --pdf-provider pypdf`(仅纯文本 PDF 可接受)"
+        )
 
 
 def _parse_claude_pdf_json(raw: str, fname: str) -> list[dict[str, Any]]:
@@ -212,20 +249,12 @@ def chunk_pdf(
     每页作为一个章节边界 (section_title='Page N') — 避免跨页合并稀释。
     页内按字符 splitter 切;如果一页文本太短(< min_chunk_chars)就整页当一个 chunk。
     """
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-    except ImportError as e:
-        raise ImportError("langchain-text-splitters 未安装") from e
+    from ..embedding.splitter import recursive_char_split
 
     chunk_size = cfg.get("pdf_chunk_size", 800)
     chunk_overlap = cfg.get("pdf_chunk_overlap", 80)
     min_chars = cfg.get("pdf_min_chunk_chars", 120)
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", ". ", "!", "?", " ", ""],
-    )
+    separators = ["\n\n", "\n", "。", ". ", "!", "?", " ", ""]
 
     chunks: list[Chunk] = []
     counter = 0
@@ -236,7 +265,11 @@ def chunk_pdf(
             continue
 
         # 超短的页直接整页当一个 chunk,不切
-        pieces = [text] if len(text) < chunk_size else splitter.split_text(text)
+        pieces = (
+            [text]
+            if len(text) < chunk_size
+            else recursive_char_split(text, chunk_size, chunk_overlap, separators)
+        )
         for piece in pieces:
             if len(piece) < min_chars and chunks and chunks[-1].page_num == page_num:
                 # 同页的碎尾合并到前一块
@@ -316,8 +349,15 @@ def describe_image(
     prompt_tpl = IMAGE_PROMPT_ZH if lang == "zh" else IMAGE_PROMPT_EN
     prompt = prompt_tpl.replace("{image_path}", str(img_path.resolve()))
 
+    # --permission-mode bypassPermissions 理由同 extract_pdf_pages_via_claude
     proc = subprocess.run(
-        [claude_bin, "-p", "--output-format", "text", "--model", model],
+        [
+            claude_bin,
+            "-p",
+            "--output-format", "text",
+            "--model", model,
+            "--permission-mode", "bypassPermissions",
+        ],
         input=prompt,
         text=True,
         capture_output=True,
@@ -329,10 +369,13 @@ def describe_image(
             f"stderr={proc.stderr[-500:]}"
         )
 
+    raw = (proc.stdout or "").strip()
+    _raise_if_permission_refusal(raw, img_path.name)
+
     # 复用现有 JSON parser
     from ..vision.claude_code import _parse_json_response
 
-    desc, ext = _parse_json_response((proc.stdout or "").strip())
+    desc, ext = _parse_json_response(raw)
     return {"description": desc, "extracted_text": ext}
 
 
