@@ -582,6 +582,7 @@ def ingest_doc_cmd(
                 f,
                 cfg_path=config,
                 force=force,
+                pdf_provider=pdf_provider,
                 log_level=log_level,
             )
             res["status"] = "✅"
