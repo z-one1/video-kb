@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
 import subprocess
 import time
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..schemas import KeyFrame, VisualDescription
+from ..utils import parse_json_block
 
 log = logging.getLogger("kb.vision")
 
@@ -163,32 +163,26 @@ def describe_frames(
 
 
 def _parse_json_response(raw: str) -> tuple[str, str | None]:
-    """从 Claude CLI 文本输出里抽 JSON。
-    容忍 markdown 围栏、前后杂字、或干脆返回纯文本的情况。
+    """从 Claude CLI 文本输出里抽 {description, extracted_text}。
+
+    通用 JSON 抽取走 `utils.parse_json_block`;本函数只负责:
+    - 按视觉响应契约挑 description / extracted_text 两个键
+    - fallback:解析失败时把整段 raw 当作 description 降级使用(不扔掉信息)
     """
     if not raw:
         return "", None
 
-    # 1. 去围栏
-    m = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
-    candidate = m.group(1) if m else raw
+    data = parse_json_block(raw)
+    if data is not None:
+        desc = str(data.get("description", "")).strip()
+        text = data.get("extracted_text")
+        if isinstance(text, str):
+            text = text.strip() or None
+        elif text is not None:
+            text = str(text)
+        return desc, text
 
-    # 2. 找第一个 {...} 对
-    m2 = re.search(r"\{.*\}", candidate, re.DOTALL)
-    if m2:
-        try:
-            data = json.loads(m2.group(0))
-            desc = str(data.get("description", "")).strip()
-            text = data.get("extracted_text")
-            if isinstance(text, str):
-                text = text.strip() or None
-            elif text is not None:
-                text = str(text)
-            return desc, text
-        except json.JSONDecodeError:
-            pass
-
-    # 3. fallback: 当作纯文本描述
+    # fallback: Claude 完全没给 JSON,把纯文本当描述(截到 2000 char)
     return raw.strip()[:2000], None
 
 

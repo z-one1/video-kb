@@ -7,22 +7,75 @@
 #   kb aliases list                    # 看当前词典
 #   kb aliases check "你的查询文本"    # 预览扩展后的查询
 #   kb ask "..." --no-aliases          # 临时禁用扩展
+#   kb aliases suggest                 # 从语料自动抽建议词(写到 aliases.suggested.yaml)
 #
 # 维护建议:
 # - 只加"用户查询语 ↔ 视频讲师用语"不一致的词(最有价值)
 # - 一组 3-6 个词足够,太多会稀释信号
 # - 中英混排完全没问题 — bge-m3 是多语种模型
+# - 跑过一段时间后,用 `kb aliases suggest` 从自己语料抽精准的增量
 #
-# ========== 以下为示例,请按你自己视频内容替换 ==========
+# ========== ICT / Smart Money Concepts 启动词典 ==========
+# 基于 CRT_secrets / ICT / SMC 通用术语。请按你实际看的视频讲师的叫法调整。
 
-# - canonical: 入场信号
-#   aliases: [entry signal, entry, trigger, setup, entry model]
-#
-# - canonical: 关键价位
-#   aliases: [key level, POI, point of interest, liquidity level]
-#
-# - canonical: 止损
-#   aliases: [stop loss, SL, invalidation, risk]
-#
-# - canonical: 蜡烛形态
-#   aliases: [candle, candlestick, price action, bar]
+# --- 结构分析 ---
+- canonical: CHoCH
+  aliases: [change of character, 结构转变, 结构改变, character change]
+
+- canonical: BOS
+  aliases: [break of structure, 结构突破, 突破结构, market structure break, MSB]
+
+- canonical: swing high
+  aliases: [摆动高点, 高点, swing point high, peak high]
+
+- canonical: swing low
+  aliases: [摆动低点, 低点, swing point low, trough low]
+
+# --- 关键价位 & 兴趣区 ---
+- canonical: Key Level
+  aliases: [关键价位, KL, key level, POI, point of interest, liquidity level]
+
+- canonical: Order Block
+  aliases: [OB, 订单块, order block, bullish OB, bearish OB]
+
+- canonical: Fair Value Gap
+  aliases: [FVG, 公允价值缺口, imbalance, 失衡, fair value gap]
+
+- canonical: Premium/Discount
+  aliases: [premium, discount, 溢价区, 折价区, PD array, premium discount]
+
+# --- 价格行为 ---
+- canonical: Displacement
+  aliases: [位移, 爆发走势, aggressive move, 单边推动, displacement]
+
+- canonical: Liquidity
+  aliases: [流动性, liquidity, liquidity pool, 流动性池, buy side liquidity, sell side liquidity, BSL, SSL]
+
+- canonical: Liquidity Sweep
+  aliases: [扫流动性, sweep, liquidity grab, stop hunt, 扫盘, 猎杀止损, liquidity run]
+
+- canonical: Mitigation
+  aliases: [回补, mitigation, rebalance, 回踩, 再平衡]
+
+# --- 时间与执行 ---
+- canonical: Kill Zone
+  aliases: [杀戮时段, killzone, 交易时段, 黄金时段, kill zone, optimal window]
+
+- canonical: Turtle Soup
+  aliases: [海龟汤, 海龟汤反转, turtle soup, false breakout reversal, 假突破反转]
+
+- canonical: CRT
+  aliases: [Candle Range Theory, 蜡烛区间理论, CRT, candle range]
+
+# --- 交易动作 ---
+- canonical: entry
+  aliases: [入场, entry signal, 入场信号, trigger, setup, entry model, 入场模型]
+
+- canonical: stop loss
+  aliases: [SL, 止损, invalidation, stop, 止损位, invalidation point]
+
+- canonical: take profit
+  aliases: [TP, 止盈, target, 目标价, profit target, 获利了结]
+
+- canonical: risk reward
+  aliases: [RR, risk-reward, 盈亏比, R:R, risk to reward, 风险回报比]

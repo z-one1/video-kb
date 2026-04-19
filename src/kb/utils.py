@@ -1,11 +1,13 @@
-"""通用工具:日志、路径、时间戳格式化。"""
+"""通用工具:日志、路径、时间戳格式化、Claude CLI 响应解析。"""
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
@@ -76,3 +78,57 @@ def doc_dir(kb_root: Path | str, doc_id: str) -> Path:
     d = Path(kb_root) / "docs" / doc_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ---------- Claude CLI 响应解析 ----------
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def parse_json_block(raw: str) -> dict[str, Any] | None:
+    """从 Claude CLI 的文本输出里抽第一个有效的 JSON 对象。
+
+    容忍三种常见情况:
+    1. 纯 JSON(直接 json.loads)
+    2. Markdown 围栏包裹(```json ... ``` 或 ``` ... ```)
+    3. JSON 混在前后解释性文字里(贪心匹配第一对 `{...}`)
+
+    找不到合法 JSON 对象时返回 None — 由调用方决定 fallback(报错 / 降级 / 跳过)。
+    只处理对象(dict),顶层是数组的场景请用专门 parser。
+
+    Args:
+        raw: Claude CLI stdout(已 strip 过更好,但本函数会自己 strip)
+
+    Returns:
+        解析出的 dict,或 None
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+
+    # 1. 尝试整体当 JSON
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # 2. 剥围栏
+    m = _FENCE_RE.search(text)
+    candidate = m.group(1) if m else text
+
+    # 3. 找第一个 {...} 对
+    m2 = _OBJECT_RE.search(candidate)
+    if not m2:
+        return None
+    try:
+        data = json.loads(m2.group(0))
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    return None

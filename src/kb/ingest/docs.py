@@ -372,10 +372,16 @@ def describe_image(
     raw = (proc.stdout or "").strip()
     _raise_if_permission_refusal(raw, img_path.name)
 
-    # 复用现有 JSON parser
-    from ..vision.claude_code import _parse_json_response
+    # 通用 JSON 抽取;Claude 偶尔不给 JSON 时 fallback 把整段当描述
+    from ..utils import parse_json_block
 
-    desc, ext = _parse_json_response(raw)
+    data = parse_json_block(raw) or {}
+    desc = str(data.get("description", "")).strip() or raw[:2000]
+    ext = data.get("extracted_text")
+    if isinstance(ext, str):
+        ext = ext.strip() or None
+    elif ext is not None:
+        ext = str(ext)
     return {"description": desc, "extracted_text": ext}
 
 

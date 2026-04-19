@@ -1,0 +1,22 @@
+# kb aliases suggest — 自动抽取的术语建议
+# ⚠️ 这是建议稿,不是正式词典。审阅后把想要的条目合并到 configs/aliases.yaml
+# 基于语料采样 16/16 个 chunks 生成 (model=sonnet)
+#
+
+- canonical: CHoCH
+  aliases: [choch, Change of Character, 趋势转变位, 转势位, 结构转变, choch位置]
+
+- canonical: BOS
+  aliases: [bos, Break of Structure, 结构突破, 结构突破位, bos位置]
+
+- canonical: FVG
+  aliases: [fvg, Fair Value Gap, 公允价值缺口, 价值缺口]
+
+- canonical: 流动性池
+  aliases: [liquidity pool, 流动性, liquidity, 流动性获取]
+
+- canonical: 庄家
+  aliases: [smart money, 机构, 庄家位置, 做市商]
+
+- canonical: 高低点
+  aliases: [swing high, swing low, 局部高点, 局部低点, 结构高低点, 波段高低点]
