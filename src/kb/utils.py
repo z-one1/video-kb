@@ -57,3 +57,22 @@ def video_dir(kb_root: Path | str, video_id: str) -> Path:
     d = Path(kb_root) / "videos" / video_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def slug_doc_id(source_path: str, source_type: str) -> str:
+    """从文档路径生成稳定 doc_id,带类型前缀 ('pdf_xxx' / 'img_xxx')。
+
+    前缀用于和 video_id 隔离 — 同样的 basename 存为不同 source_type 不冲突。
+    """
+    p = Path(source_path)
+    base = re.sub(r"[^a-zA-Z0-9_\-]", "_", p.stem)[:50]
+    h = hashlib.md5(str(p.resolve()).encode("utf-8")).hexdigest()[:8]
+    prefix = {"pdf": "pdf", "image": "img"}.get(source_type, "doc")
+    return f"{prefix}_{base}_{h}"
+
+
+def doc_dir(kb_root: Path | str, doc_id: str) -> Path:
+    """返回 kb/docs/<doc_id>/,并确保存在。"""
+    d = Path(kb_root) / "docs" / doc_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d

@@ -4,6 +4,7 @@
 paths:
   kb_root: kb                    # 知识库根目录
   videos_dir: kb/videos          # 每视频一个子目录
+  docs_dir: kb/docs              # 每独立文档(PDF/图片)一个子目录
   chroma_dir: kb/kb_db           # ChromaDB 向量库
 
 ingest:
@@ -27,7 +28,11 @@ scenes:
   threshold: 27.0                # ContentDetector 阈值,越低越敏感
   min_scene_len: 15              # 最短场景(帧数)
   fallback_interval_sec: 30      # 无场景切换时的兜底采样间隔
-  max_frames: 200                # 单视频最大帧数上限 (保护额度)
+  # 动态 max_frames — 按视频时长计算,取代旧的静态 200 cap
+  # 公式: max_frames = clamp(round(duration_min * frames_per_minute), floor, ceiling)
+  frames_per_minute: 5           # 目标密度,自然检出约 2-2.5/min, 5 给视觉密集段留 2x buffer
+  max_frames_floor: 20           # 短视频保底 (<4min 时生效)
+  max_frames_ceiling: 160        # 长视频硬上限 (>32min 时生效, 保护 Gemini 免费额度)
 
 vision:
   provider: "claude_code"        # claude_code | gemini | none
@@ -57,6 +62,11 @@ embedding:
   chunk_overlap: 50
   batch_size: 32
   normalize: true
+  # 切块控制 — 防止单个 chunk 被视觉描述灌水/检索时短碎片过多
+  transcript_window_sec: 90      # 字幕滑窗长度 (秒)
+  max_visuals_per_window: 3      # 每个窗口最多并入几条 [画面]/[屏幕文字] 描述
+  max_visual_chars: 200          # 单条视觉描述字符上限 (超过截断)
+  min_chunk_chars: 120           # 短于此阈值的 chunk 与同章节前块合并
 
 export:
   claude_project_dir: claude_upload  # 输出到项目根目录下的这个文件夹
@@ -67,3 +77,18 @@ ask:
   provider: "claude_code"         # 目前只支持 claude_code(复用 Max 订阅,零成本)
   claude_model: "sonnet"          # sonnet | opus | haiku(留空则复用 structuring.claude_model)
   timeout_sec: 180                # 单次 CLI 调用超时
+
+retrieval:
+  # 同义词词典 — 查询时把已知概念扩展成整组同义词,提升召回
+  # 文件不存在或为空时自动跳过;CLI 可用 --no-aliases 临时关闭
+  aliases_path: configs/aliases.yaml
+
+ingest_doc:
+  # kb ingest-doc — PDF + 独立图片入库
+  pdf_provider: "claude_code"     # claude_code (默认,能 OCR+图表描述+表格结构) | pypdf (快,仅可选文本层)
+  pdf_claude_model: "sonnet"      # claude_code 提供者专用的模型
+  pdf_timeout_sec: 600            # 大 PDF 单次 Claude CLI 调用超时(秒)
+  pdf_chunk_size: 800             # PDF 每页内继续按字符切块的目标大小
+  pdf_chunk_overlap: 80           # PDF chunk 重叠
+  pdf_min_chunk_chars: 120        # PDF 短 chunk 合并阈值
+  image_prompt_lang: "zh"         # 图片描述提示词语言:zh | en(影响 Claude 产出语言)

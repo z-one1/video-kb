@@ -15,6 +15,8 @@ dependencies = [
     # 视觉理解
     "google-genai>=0.3.0",
     "Pillow>=10.0.0",
+    # PDF 文本抽取 (kb ingest-doc)
+    "pypdf>=5.0.0",
     # 嵌入 + 分块
     "sentence-transformers>=3.0",
     "langchain-text-splitters>=0.3.0",
