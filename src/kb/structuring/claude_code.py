@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..schemas import EnrichedSegment, NoteSection, Notes
+from ..utils import repair_llm_json
 from .prompts import STRUCTURING_PROMPT, build_content_block
 
 log = logging.getLogger("kb.structuring")
@@ -81,79 +82,9 @@ def structure_notes(
         log.error(f"原始 LLM 输出已保存到: {dump_path}")
 
         log.warning("尝试修复 JSON 并重解析...")
-        fixed = _attempt_json_repair(raw)
+        fixed = repair_llm_json(raw)
         notes = _parse_notes_json(fixed, video_id, enriched)
     return notes
-
-
-def _attempt_json_repair(raw: str) -> str:
-    """最大努力修复常见 LLM JSON 输出错误:
-    1. 剥离 ```json ... ``` 围栏
-    2. 字符串值内未转义的 ASCII 双引号 → \\"
-       启发式: 只处理"双引号在字符串值中间且前后有中文字符"的情况
-    3. 单引号 → 双引号(谨慎,只处理键名)
-    """
-    s = raw.strip()
-
-    # 1. 剥围栏
-    m = re.search(r"```(?:json)?\s*(.*?)\s*```", s, re.DOTALL)
-    if m:
-        s = m.group(1).strip()
-
-    # 2. 修内部未转义双引号
-    # 思路: 匹配 "key": "...<中文>"<词>"<中文>...",
-    #       把 value 内部的 " 转义成 \"
-    # 简单启发: 把 `非\的" 紧跟非 JSON 结构字符(如中文/字母/数字)` 且前面不是 `:` 或 `,` 或 `{` 的情况修复
-    # 更稳的做法: 逐字符扫描,跟踪是否在字符串内部
-    s = _escape_inner_quotes(s)
-    return s
-
-
-def _escape_inner_quotes(s: str) -> str:
-    """逐字符扫描,把字符串值内部未转义的 ASCII 双引号转成 \\".
-
-    状态机:
-    - out_of_string: 找到 `"` → 进入字符串
-    - in_string: 找到 `\\"` → 跳过;找到 `"` 且后面紧跟 JSON 结构符(,}]:\\s) → 退出字符串
-                  否则这个 `"` 是字符串内未转义引号 → 替换成 \\"
-    """
-    out: list[str] = []
-    in_str = False
-    i = 0
-    n = len(s)
-    while i < n:
-        ch = s[i]
-        if not in_str:
-            out.append(ch)
-            if ch == '"':
-                in_str = True
-            i += 1
-            continue
-        # in_string
-        if ch == "\\" and i + 1 < n:
-            out.append(ch)
-            out.append(s[i + 1])
-            i += 2
-            continue
-        if ch == '"':
-            # 看后面第一个非空白字符
-            j = i + 1
-            while j < n and s[j] in " \t\r\n":
-                j += 1
-            next_ch = s[j] if j < n else ""
-            if next_ch in ",}]:" or next_ch == "":
-                # 合法的字符串结束
-                out.append(ch)
-                in_str = False
-                i += 1
-                continue
-            # 否则是字符串内部未转义的引号,转义之
-            out.append('\\"')
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
 
 
 def _parse_notes_json(

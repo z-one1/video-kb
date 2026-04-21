@@ -130,6 +130,43 @@ def test_parse_claude_pdf_json_fills_missing_page_num():
     assert [p["page_num"] for p in pages] == [1, 2]
 
 
+def test_parse_claude_pdf_json_repairs_unescaped_inner_quote():
+    """Claude 在描述图表时嵌套原文引号忘加 \\ — repair_llm_json 应自愈。"""
+    raw = '[{"page_num": 1, "text": "底部注释"5分钟右侧结构局部视角""}]'
+    pages = _parse_claude_pdf_json(raw, "x.pdf")
+    assert len(pages) == 1
+    assert pages[0]["page_num"] == 1
+    assert "5分钟右侧结构局部视角" in pages[0]["text"]
+
+
+def test_parse_claude_pdf_json_salvages_truncated_output():
+    """Claude 输出被截断(Unterminated string) — 抢救前面完整的页。"""
+    # 5 页完整 + 第 6 页被截断
+    body = ", ".join(
+        f'{{"page_num": {i}, "text": "content {i}"}}' for i in range(1, 6)
+    )
+    raw = "[" + body + ', {"page_num": 6, "text": "this is truncated mid'
+    pages = _parse_claude_pdf_json(raw, "truncated.pdf")
+    # 前 5 页应被抢救出来
+    assert len(pages) == 5
+    assert [p["page_num"] for p in pages] == [1, 2, 3, 4, 5]
+    assert pages[4]["text"] == "content 5"
+
+
+def test_parse_claude_pdf_json_salvages_midpage_breakage():
+    """中间某页坏了(非法转义),前后完整的页仍应抢救出。"""
+    raw = (
+        '[{"page_num": 1, "text": "good"}, '
+        '{"page_num": 2, "text": "bad"inner" bad"}, '  # 双重破坏,repair 也救不了
+        '{"page_num": 3, "text": "good again"}]'
+    )
+    pages = _parse_claude_pdf_json(raw, "mid_break.pdf")
+    nums = [p["page_num"] for p in pages]
+    # 至少第 1、3 页能抢救
+    assert 1 in nums
+    assert 3 in nums
+
+
 # ============ chunk_pdf ============
 
 

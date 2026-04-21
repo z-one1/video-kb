@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
-from kb.utils import parse_json_block
+import json
+
+from kb.utils import parse_json_block, repair_llm_json
 
 
 class TestCleanJson:
@@ -118,3 +120,83 @@ class TestRealWorldShapes:
             "description": "A whiteboard with ICT diagrams",
             "extracted_text": "BOS / CHoCH / POI",
         }
+
+
+class TestRepairLlmJson:
+    """repair_llm_json — 修补 Claude 常见 JSON 输出错误。
+
+    最常见的症状:Claude 在字符串值里嵌套原文引号(图表标注、视频字幕)
+    但忘了给内部 `"` 加反斜杠 → json.loads 报 'Expecting ',' delimiter'。
+    """
+
+    def test_idempotent_on_valid_json(self):
+        """已合法的 JSON 不应被破坏。"""
+        raw = '{"a": 1, "b": "hello"}'
+        fixed = repair_llm_json(raw)
+        assert json.loads(fixed) == {"a": 1, "b": "hello"}
+
+    def test_strips_json_fence(self):
+        raw = '```json\n{"a": 1}\n```'
+        fixed = repair_llm_json(raw)
+        assert json.loads(fixed) == {"a": 1}
+
+    def test_strips_bare_fence(self):
+        raw = '```\n{"a": 1}\n```'
+        fixed = repair_llm_json(raw)
+        assert json.loads(fixed) == {"a": 1}
+
+    def test_empty_input_safe(self):
+        assert repair_llm_json("") == ""
+        assert repair_llm_json(None) == ""  # type: ignore[arg-type]
+        assert repair_llm_json("   ") == ""
+
+    def test_fixes_single_unescaped_inner_quote(self):
+        """经典例子:讲师说的 "Key Level" 出现在 "text" 值里。"""
+        # {"text": "before"inner"after"}
+        raw = '{"text": "before"inner"after"}'
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert data["text"] == 'before"inner"after'
+
+    def test_fixes_multiple_unescaped_inner_quotes(self):
+        raw = '{"text": "see "A" and "B" and "C""}'
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert data["text"] == 'see "A" and "B" and "C"'
+
+    def test_real_pdf_failure_pattern(self):
+        """来自用户反馈:5 份 PDF 都卡在这个形状上。"""
+        # 对应实际错误:{"text": "底部注释"5分钟右侧结构局部视角""}
+        raw = '[{"page_num": 1, "text": "底部注释"5分钟右侧结构局部视角""}]'
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert data[0]["page_num"] == 1
+        assert '"5分钟右侧结构局部视角"' in data[0]["text"]
+
+    def test_fence_plus_inner_quote(self):
+        """围栏 + 内部引号 —— 两种修补叠加。"""
+        raw = '```json\n{"text": "he said "ok" loudly"}\n```'
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert data["text"] == 'he said "ok" loudly'
+
+    def test_does_not_break_escaped_quote(self):
+        """已转义的 \\" 不该被再次处理。"""
+        raw = '{"text": "already \\"escaped\\" fine"}'
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert data["text"] == 'already "escaped" fine'
+
+    def test_handles_multiline_array(self):
+        """真实 PDF 响应是多页数组。"""
+        raw = (
+            '[\n'
+            '  {"page_num": 1, "text": "页一 "重点" 内容"},\n'
+            '  {"page_num": 2, "text": "页二正常"}\n'
+            ']'
+        )
+        fixed = repair_llm_json(raw)
+        data = json.loads(fixed)
+        assert len(data) == 2
+        assert '"重点"' in data[0]["text"]
+        assert data[1]["text"] == "页二正常"

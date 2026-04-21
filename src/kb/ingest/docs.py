@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..schemas import Chunk, DocMeta
-from ..utils import now_iso, slug_doc_id
+from ..utils import now_iso, repair_llm_json, slug_doc_id
 
 log = logging.getLogger("kb.ingest.docs")
 
@@ -138,6 +138,16 @@ def extract_pdf_pages_via_claude(
     # 否则 Claude 会拿 @pdf_path 触发 Read tool 然后卡在"请授权"上,subprocess
     # 拿到的 stdout 是权限提示文本而不是我们要的 JSON。
     # 用户主动敲 `kb ingest-doc <file>` 即为同意读该文件,故可直接 bypass。
+    #
+    # CLAUDE_CODE_MAX_OUTPUT_TOKENS: 长 PDF 逐页转录极易顶到默认输出上限,
+    # 结果是 stdout 在某页 "text": "..." 中间被截断 → json.loads 报
+    # `Unterminated string`。默认拉高到 16000,用户可通过环境变量覆盖。
+    import os as _os
+    env = _os.environ.copy()
+    env.setdefault(
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        str(cfg.get("claude_max_output_tokens", 16000)),
+    )
     proc = subprocess.run(
         [
             claude_bin,
@@ -150,6 +160,7 @@ def extract_pdf_pages_via_claude(
         text=True,
         capture_output=True,
         timeout=timeout_sec,
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -190,10 +201,89 @@ def _raise_if_permission_refusal(raw: str, fname: str) -> None:
         )
 
 
+def _salvage_complete_pages(arr_text: str) -> list[dict[str, Any]]:
+    """当整段 JSON 数组解析失败时,扫出前 N 个仍合法的顶层对象。
+
+    适用场景:
+    - Claude 输出被截断(`Unterminated string`),最后一页不完整,前面都 OK
+    - 中间某页有非法转义,前后都能单独解析
+
+    实现:逐字符状态机。跟踪 `in_string` / 转义 / `{...}` 嵌套深度。遇到深度归零
+    的 `}` 时,取出 `[start:end+1]` 片段独立 `json.loads`;成功就收,失败就丢。
+
+    只在顶层 `[` 开头的文本上工作;其他情况返回空列表(让调用方走 fallback)。
+
+    Args:
+        arr_text: `repair_llm_json` 处理过的数组文本(仍非法)
+
+    Returns:
+        能解析出的 page 对象列表。可能为空。
+    """
+    s = arr_text.lstrip()
+    if not s.startswith("["):
+        return []
+
+    results: list[dict[str, Any]] = []
+    depth = 0
+    in_str = False
+    escape = False
+    start = -1
+    n = len(s)
+    i = 1  # 跳过开头的 `[`
+
+    while i < n:
+        ch = s[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if in_str:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            i += 1
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                chunk = s[start : i + 1]
+                try:
+                    obj = json.loads(chunk)
+                    if isinstance(obj, dict):
+                        results.append(obj)
+                except json.JSONDecodeError:
+                    pass  # 丢掉这个对象,继续找下一个
+                start = -1
+            i += 1
+            continue
+        i += 1
+
+    return results
+
+
 def _parse_claude_pdf_json(raw: str, fname: str) -> list[dict[str, Any]]:
-    """从 Claude 返回里挖 JSON 数组。容忍围栏、前后杂字、偶尔的非法转义。"""
+    """从 Claude 返回里挖 JSON 数组。容忍围栏、前后杂字、偶尔的非法转义。
+
+    Claude 在描述图表/截图时经常在 "text" 字段里嵌套原文引号(如
+    `"底部注释"5分钟右侧结构局部视角"`),忘了给内部 `"` 加反斜杠 →
+    `json.loads` 报 "Expecting ',' delimiter"。这里走一次 `repair_llm_json`
+    自愈。修不回来时把原始输出转存到 tempdir 以便人工检查。
+    """
     import json
+    import os
     import re
+    import tempfile
 
     if not raw:
         raise ValueError(f"Claude 对 {fname} 返回空内容")
@@ -210,13 +300,52 @@ def _parse_claude_pdf_json(raw: str, fname: str) -> list[dict[str, Any]]:
             f"前 300 字符:{raw[:300]!r}"
         )
 
+    arr_text = m2.group(0)
     try:
-        data = json.loads(m2.group(0))
+        data = json.loads(arr_text)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Claude 对 {fname} 的 JSON 解析失败 ({e})。"
-            f"前 300 字符:{m2.group(0)[:300]!r}"
-        ) from e
+        # 先把原始输出落盘,方便排查
+        dump_dir = os.environ.get("KB_DEBUG_DUMP_DIR", tempfile.gettempdir())
+        safe_name = re.sub(r"[^\w\-.]", "_", fname)[:80]
+        dump_path = Path(dump_dir) / f"pdf_raw_{safe_name}.txt"
+        try:
+            dump_path.write_text(raw, encoding="utf-8")
+            log.warning(
+                f"Claude 对 {fname} 首次 JSON 解析失败 ({e});原始输出已转存: {dump_path}。尝试修复..."
+            )
+        except OSError:
+            dump_path = None  # type: ignore[assignment]
+            log.warning(f"Claude 对 {fname} 首次 JSON 解析失败 ({e});尝试修复...")
+
+        fixed = repair_llm_json(arr_text)
+        try:
+            data = json.loads(fixed)
+            log.info(f"  → {fname} JSON 自动修复成功")
+        except json.JSONDecodeError as e2:
+            # 第三招:抢救完整页。Claude 偶尔会输出被截断(`Unterminated
+            # string`),或者中间某页非法转义——整段 json.loads 崩了,但前面
+            # N 个完整对象其实是好的。逐对象扫 `{...}` 独立解析,能救一个
+            # 算一个。
+            salvaged = _salvage_complete_pages(fixed)
+            if salvaged:
+                log.warning(
+                    f"  → {fname} 整体 JSON 仍不合法,抢救出 {len(salvaged)} 个完整页"
+                    f"(可能有尾部页丢失,请检查 {dump_path} 确认)"
+                )
+                data = salvaged
+            else:
+                hint = (
+                    f"Claude 对 {fname} 的 JSON 解析失败 ({e2}),修复+抢救均无效。\n"
+                    f"  原始输出: {dump_path}\n"
+                    f"  前 300 字符:{arr_text[:300]!r}\n\n"
+                    f"修复建议:\n"
+                    f"  1. 人工查看转储文件,给内部引号补 \\ 后重跑\n"
+                    f"  2. 该 PDF 如无复杂图表,可降级走 `--pdf-provider pypdf --force`\n"
+                    f"  3. 若是 `Unterminated string`(输出被截断):\n"
+                    f"     - 把 PDF 拆成更小的几份重跑,或\n"
+                    f"     - 设置 `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16000` 环境变量后重跑"
+                )
+                raise ValueError(hint) from e2
 
     if not isinstance(data, list):
         raise ValueError(f"Claude 返回不是列表,而是 {type(data).__name__}")

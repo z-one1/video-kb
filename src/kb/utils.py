@@ -86,6 +86,83 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
+def _escape_inner_quotes(s: str) -> str:
+    """状态机逐字符扫描,把字符串值内部未转义的 ASCII `"` 转成 `\\"`。
+
+    LLM 吐 JSON 常见失败模式:在 "text" 值里引用原话(如讲师说的 "Key Level"
+    或题目里的 "..."),但忘了给内部 `"` 加反斜杠,导致 json.loads 崩在某个
+    「Expecting ',' delimiter」错误上。
+
+    状态机:
+    - out_of_string: 遇到 `"` → 进入字符串
+    - in_string: 遇到 `\\?` → 整对跳过(已转义);
+                  遇到 `"` 且后面紧跟 `,}]:` 或空白+上述字符 → 退出字符串;
+                  否则是内部未转义 `"`,替换成 `\\"` 修补。
+    """
+    out: list[str] = []
+    in_str = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if not in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str = True
+            i += 1
+            continue
+        # in_string
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(s[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            next_ch = s[j] if j < n else ""
+            if next_ch in ",}]:" or next_ch == "":
+                out.append(ch)
+                in_str = False
+                i += 1
+                continue
+            out.append('\\"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def repair_llm_json(raw: str) -> str:
+    """最大努力修复常见 LLM JSON 输出错误,返回修复后的字符串。
+
+    覆盖模式:
+    1. 剥离 ```json ... ``` 或 ``` ... ``` 围栏(如果有的话)
+    2. 状态机修复字符串值内部未转义的双引号
+
+    使用模式:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            fixed = repair_llm_json(raw)
+            data = json.loads(fixed)  # 还不行就让它抛,调用方自己降级
+
+    注意:这个函数**只修补**,不验证。修复后的字符串仍可能非法 JSON,
+    调用方要么继续 try/except,要么接受失败。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return s
+
+    m = _FENCE_RE.search(s)
+    if m:
+        s = m.group(1).strip()
+
+    return _escape_inner_quotes(s)
+
+
 def parse_json_block(raw: str) -> dict[str, Any] | None:
     """从 Claude CLI 的文本输出里抽第一个有效的 JSON 对象。
 
